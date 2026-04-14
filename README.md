@@ -2,24 +2,33 @@
 
 A custom, protocol-level internet tunnel built in Rust. Designed from scratch — not based on VLESS, Shadowsocks, or any existing proxy protocol.
 
+**v2: Now with WebSocket transport and CDN bypass for total internet blockouts.**
+
 ## How It Works
 
-Unlike VPNs and standard proxies that use recognizable protocols (which get fingerprinted and blocked), Phantom Tunnel hides data inside **normal HTTP API calls**:
+Unlike VPNs and standard proxies that use recognizable protocols (which get fingerprinted and blocked), Phantom Tunnel hides data inside **normal web traffic**:
 
+### Direct Mode
 ```
-Browser → SOCKS5 (local :1080) → Phantom Client → HTTP POST requests → CDN → Phantom Server → Internet
+Browser → SOCKS5 (local :1080) → Phantom Client → HTTP POST → Phantom Server → Internet
 ```
 
-To network observers, traffic looks like a web application making API calls to a piano lessons website. No WebSocket upgrades, no long-lived connections, no unusual protocols.
+### CDN Bypass Mode (for censored networks like Iran)
+```
+Browser → SOCKS5 → Phantom Client → WebSocket → CDN Edge (domestic IP:80) → CDN Forward → Phantom Server → Internet
+```
+
+To DPI/censors, CDN bypass traffic looks like a normal web application connecting to a domestic website's real-time feature. No unusual protocols, no foreign IPs visible.
 
 ## Architecture
 
 ```
 phantom-tunnel/
-├── phantom-proto/     # Shared: encryption (XChaCha20-Poly1305), framing, auth
-├── phantom-server/    # VPS: HTTP server with covert tunnel + real website
-├── phantom-client/    # Local: SOCKS5 proxy + HTTP tunnel client
-└── static/            # Camouflage website content
+├── phantom-proto/     # Shared: encryption (XChaCha20-Poly1305), framing, auth, padding
+├── phantom-server/    # VPS: HTTP server + WebSocket tunnel + real website
+├── phantom-client/    # Local: SOCKS5 proxy + WebSocket/HTTP tunnel client
+├── phantom-bridge/    # Domestic relay: transparent TCP forwarder for censored networks
+└── static/            # Camouflage website content (piano lessons)
 ```
 
 ## Build
@@ -30,6 +39,9 @@ cargo build --release -p phantom-server
 
 # Client (on local machine)
 cargo build --release -p phantom-client
+
+# Bridge (on domestic VPS, if needed)
+cargo build --release -p phantom-bridge
 ```
 
 ## Usage
@@ -39,25 +51,69 @@ cargo build --release -p phantom-client
 ./phantom-server --port 80 --secret "your-shared-secret"
 ```
 
-### Client
+### Client (Direct — outside censored networks)
 ```bash
 ./phantom-client \
-  --server https://piano-lessons.site \
+  --server http://35.222.22.49 \
   --secret "your-shared-secret" \
   --listen 127.0.0.1:1080
 ```
 
-Then configure your browser/apps to use SOCKS5 proxy at `127.0.0.1:1080`.
+### Client (CDN Bypass — for Iran/censored networks)
+```bash
+# Connect through ArvanCloud CDN edge (domestic IP, whitelisted by DPI)
+./phantom-client \
+  --server http://piano-lessons.site \
+  --secret "your-shared-secret" \
+  --listen 127.0.0.1:1080 \
+  --transport ws \
+  --cdn-edge "185.143.234.235:80" \
+  --host "piano-lessons.site"
+```
+
+### Bridge (on domestic VPS)
+```bash
+# Run on a VPS inside the censored country
+./phantom-bridge --listen 0.0.0.0:80 --upstream 35.222.22.49:80
+
+# Then point the client to the bridge instead
+./phantom-client \
+  --server http://domestic-vps-ip \
+  --secret "your-shared-secret" \
+  --transport ws
+```
 
 ### Android (via Termux)
 ```bash
 # In Termux
 wget https://your-release-url/phantom-client-android
 chmod +x phantom-client-android
-./phantom-client-android -S https://piano-lessons.site -s "your-secret" -l 127.0.0.1:1080
+./phantom-client-android \
+  -S http://piano-lessons.site \
+  -s "your-secret" \
+  -l 127.0.0.1:1080 \
+  --transport ws \
+  --cdn-edge "185.143.234.235:80" \
+  --host "piano-lessons.site"
 
 # Then: Android Settings → WiFi → Proxy → Manual → localhost:1080
 ```
+
+## Transport Modes
+
+| Mode | Flag | Use Case |
+|------|------|----------|
+| **WebSocket** | `--transport ws` | CDN bypass, persistent connection, recommended for Iran |
+| **HTTP Polling** | `--transport http` | Direct connections, fallback mode |
+| **Auto** | `--transport auto` | Tries WebSocket first, falls back to HTTP (default) |
+
+## CDN Bypass Setup (ArvanCloud)
+
+1. **Buy domain**: e.g., `piano-lessons.site`
+2. **Add to ArvanCloud**: Point domain to your server's IP
+3. **Enable WebSocket**: In ArvanCloud dashboard, enable WebSocket forwarding
+4. **Note edge IPs**: ArvanCloud assigns domestic edge IPs to your domain
+5. **Configure client**: Use `--cdn-edge` with the ArvanCloud edge IP
 
 ## Deploy to VPS
 ```bash
@@ -70,3 +126,5 @@ chmod +x deploy.sh
 - **Authentication:** HMAC-SHA256 with pre-shared key
 - **Probe resistance:** Unauthenticated visitors see a real website
 - **No fingerprint:** Custom protocol — not in any DPI signature database
+- **Traffic padding:** Messages padded to fixed block sizes to prevent analysis
+- **CDN cover:** Traffic routes through legitimate domestic CDN infrastructure

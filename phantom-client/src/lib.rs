@@ -1,30 +1,77 @@
-// phantom-client: Covert HTTP tunnel client
+// phantom-client: Covert tunnel client with CDN bypass support
 //
-// This client does three things:
+// This client does four things:
 // 1. Opens a local SOCKS5 proxy (default :1080) for apps to connect through
-// 2. Multiplexes all SOCKS5 streams into encrypted HTTP POST requests
-// 3. Sends those requests to the Phantom server disguised as API calls
+// 2. Multiplexes all SOCKS5 streams into encrypted frames
+// 3. Sends frames via WebSocket (CDN-compatible) or HTTP POST (fallback)
+// 4. Supports CDN mode for bypassing internet blockouts (Iran, etc.)
 //
-// Traffic pattern: rapid short-lived HTTP POST/response cycles
-// that look like a web app making API calls — not a persistent tunnel.
-
+// CDN bypass architecture:
+//   Browser → SOCKS5 :1080 → Phantom Client → WebSocket → CDN Edge → Phantom Server → Internet
+//   DPI sees: HTTP WebSocket to domestic CDN IP with domestic domain → ALLOWED
 
 pub mod ffi;
+pub(crate) mod fragment;
+pub(crate) mod transport;
 
 use phantom_proto::*;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-// ─── Messages between SOCKS5 handlers and the poller ───────────
+// Re-export for external use
+pub use transport::TransportMode;
 
-enum UpstreamMsg {
+// ─── Client Configuration ──────────────────────────────────────
+
+#[derive(Clone, Debug)]
+pub struct ClientConfig {
+    /// Server URL (e.g., "http://piano-lessons.site" or "http://35.222.22.49")
+    pub server_url: String,
+    /// Shared secret (must match server)
+    pub secret: String,
+    /// Local SOCKS5 listen address (e.g., "127.0.0.1:1080")
+    pub listen: String,
+    /// Transport mode: WebSocket, Http, or Auto
+    pub transport: TransportMode,
+    /// CDN edge IP:port to connect to (e.g., "185.143.234.235:80")
+    /// When set, client connects to this IP instead of the server URL's host
+    pub cdn_edge: Option<String>,
+    /// Custom Host header (e.g., "piano-lessons.site")
+    /// Used with CDN mode to tell the CDN which origin to forward to
+    pub host_override: Option<String>,
+    /// Enable TLS ClientHello fragmentation (for HTTPS connections)
+    pub fragment: bool,
+    /// Fragment chunk size in bytes (default: 40)
+    pub fragment_size: usize,
+    /// Enable traffic padding to prevent size-based fingerprinting
+    pub padding: bool,
+}
+
+impl Default for ClientConfig {
+    fn default() -> Self {
+        Self {
+            server_url: String::new(),
+            secret: String::new(),
+            listen: "127.0.0.1:1080".to_string(),
+            transport: TransportMode::Auto,
+            cdn_edge: None,
+            host_override: None,
+            fragment: false,
+            fragment_size: 40,
+            padding: true,
+        }
+    }
+}
+
+// ─── Internal Types (shared with transport module) ─────────────
+
+pub(crate) enum UpstreamMsg {
     Connect {
         stream_id: u32,
         addr: String,
@@ -39,41 +86,50 @@ enum UpstreamMsg {
     },
 }
 
-// ─── Shared Tunnel State ───────────────────────────────────────
-
-struct TunnelState {
-    /// Send downstream data to SOCKS5 handlers
-    downstream_txs: HashMap<u32, mpsc::Sender<Vec<u8>>>,
-    /// Pending connect replies
-    connect_replies: HashMap<u32, tokio::sync::oneshot::Sender<bool>>,
+pub(crate) struct TunnelState {
+    /// Per-stream downstream data channels
+    pub downstream_txs: HashMap<u32, mpsc::Sender<Vec<u8>>>,
+    /// Pending connect reply channels
+    pub connect_replies: HashMap<u32, tokio::sync::oneshot::Sender<bool>>,
 }
 
-// ─── Main ──────────────────────────────────────────────────────
+// ─── Entry Points ──────────────────────────────────────────────
 
+/// Start the client with minimal configuration (backward compatible).
 pub async fn start_client(server_url: String, secret: String, listen: String) {
-    let key = derive_key(&secret);
-    let server_url = server_url.trim_end_matches('/').to_string();
+    start_client_with_config(ClientConfig {
+        server_url,
+        secret,
+        listen,
+        transport: TransportMode::Auto,
+        ..Default::default()
+    })
+    .await;
+}
 
-    info!("Phantom Client starting");
-    info!("Server: {}", server_url);
-    info!("SOCKS5 proxy: {}", listen);
+/// Start the client with full configuration.
+pub async fn start_client_with_config(config: ClientConfig) {
+    let key = derive_key(&config.secret);
+    let server_url = config.server_url.trim_end_matches('/').to_string();
 
-    // Build HTTP client with connection pooling
-    let http_client = Client::builder()
-        .pool_max_idle_per_host(4)
-        .timeout(Duration::from_secs(30))
-        .danger_accept_invalid_certs(true) // for ArvanCloud CDN flexibility
-        .build()
-        .expect("failed to build HTTP client");
+    info!("[PHANTOM] ═══════════════════════════════════════");
+    info!("[PHANTOM] Phantom Client v0.2.0 starting");
+    info!("[PHANTOM] Server: {}", server_url);
+    info!("[PHANTOM] Transport: {:?}", config.transport);
+    info!("[PHANTOM] SOCKS5 proxy: {}", config.listen);
+    info!("[PHANTOM] Padding: {}", if config.padding { "ON" } else { "OFF" });
+    if let Some(ref edge) = config.cdn_edge {
+        info!("[PHANTOM] CDN edge: {}", edge);
+    }
+    if let Some(ref host) = config.host_override {
+        info!("[PHANTOM] Host override: {}", host);
+    }
+    if config.fragment {
+        info!("[PHANTOM] TLS fragment: ON ({}B chunks)", config.fragment_size);
+    }
+    info!("[PHANTOM] ═══════════════════════════════════════");
 
-    // Authenticate with server
-    let token = authenticate(&http_client, &server_url, &secret)
-        .await
-        .expect("authentication failed — check your secret and server URL");
-
-    info!("Authenticated successfully. Session: {}...", &token[..16]);
-
-    // Channels for SOCKS5 handler ↔ poller communication
+    // Channels for SOCKS5 handler ↔ transport communication
     let (upstream_tx, upstream_rx) = mpsc::channel::<UpstreamMsg>(4096);
 
     let tunnel_state = Arc::new(Mutex::new(TunnelState {
@@ -81,34 +137,36 @@ pub async fn start_client(server_url: String, secret: String, listen: String) {
         connect_replies: HashMap::new(),
     }));
 
-    // Spawn the central HTTP polling loop
-    let poller_state = tunnel_state.clone();
-    let poller_token = token.clone();
-    let poller_key = key;
-    let poller_url = server_url.clone();
-    let poll_idle = Duration::from_millis(200);
-    let poll_active = Duration::from_millis(50);
+    // Build transport configuration
+    let transport_config = transport::TransportConfig {
+        server_url: server_url.clone(),
+        secret: config.secret.clone(),
+        key,
+        mode: config.transport.clone(),
+        host_header: config.host_override.clone(),
+        cdn_edge: config.cdn_edge.clone(),
+        fragment_enabled: config.fragment,
+        fragment_size: config.fragment_size,
+        padding_enabled: config.padding,
+    };
 
+    // Spawn the transport loop (WebSocket, HTTP, or Auto)
+    info!("[PHANTOM] Launching transport...");
+    let transport_state = tunnel_state.clone();
     tokio::spawn(async move {
-        poller_loop(
-            http_client,
-            poller_url,
-            poller_token,
-            poller_key,
-            upstream_rx,
-            poller_state,
-            poll_active,
-            poll_idle,
-        )
-        .await;
+        transport::run_transport(transport_config, upstream_rx, transport_state).await;
     });
 
     // Open SOCKS5 listener
-    let listener = TcpListener::bind(&listen)
-        .await
-        .expect("failed to bind SOCKS5 listener");
+    let listener = match TcpListener::bind(&config.listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("[PHANTOM] ❌ Failed to bind SOCKS5 on {}: {} (port in use?)", config.listen, e);
+            return;
+        }
+    };
 
-    info!("SOCKS5 proxy listening on {}", listen);
+    info!("[PHANTOM] ✓ SOCKS5 proxy listening on {}", config.listen);
 
     let next_stream_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
 
@@ -122,49 +180,85 @@ pub async fn start_client(server_url: String, secret: String, listen: String) {
 
         tokio::spawn(async move {
             if let Err(e) = handle_socks5(socket, stream_id, tx, state).await {
-                warn!("SOCKS5 stream {} error: {}", stream_id, e);
+                warn!("[PHANTOM] SOCKS5 stream {} error: {}", stream_id, e);
             }
         });
     }
 }
 
-// ─── Authentication ────────────────────────────────────────────
+// ─── Shared Helpers (used by transport module) ─────────────────
 
-async fn authenticate(
-    client: &Client,
-    server_url: &str,
-    secret: &str,
-) -> Result<String, String> {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    let sig = sign_auth(secret, ts);
-
-    let url = format!("{}/api/v1/auth/login", server_url);
-    let body = AuthRequest { ts, sig };
-
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Auth failed with status {}", resp.status()));
+/// Convert an upstream message into protocol frames.
+pub(crate) async fn process_upstream_msg(
+    msg: UpstreamMsg,
+    frames: &mut Vec<Frame>,
+    tunnel_state: &Arc<Mutex<TunnelState>>,
+) {
+    match msg {
+        UpstreamMsg::Connect {
+            stream_id,
+            addr,
+            reply,
+        } => {
+            frames.push(Frame::connect(stream_id, &addr));
+            // Store the reply sender for when we get CONNECT_OK/ERR back
+            tunnel_state
+                .lock()
+                .await
+                .connect_replies
+                .insert(stream_id, reply);
+        }
+        UpstreamMsg::Data { stream_id, data } => {
+            // Split large data into multiple frames (max 65535 bytes per frame)
+            for chunk in data.chunks(32768) {
+                frames.push(Frame::data(stream_id, chunk.to_vec()));
+            }
+        }
+        UpstreamMsg::Close { stream_id } => {
+            frames.push(Frame::close(stream_id));
+        }
     }
+}
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Bad response: {}", e))?;
+/// Dispatch downstream frames to the appropriate SOCKS5 handlers.
+pub(crate) async fn dispatch_downstream(
+    frames: Vec<Frame>,
+    tunnel_state: &Arc<Mutex<TunnelState>>,
+) {
+    let mut state = tunnel_state.lock().await;
 
-    json["token"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "No token in response".to_string())
+    for frame in frames {
+        match frame.cmd {
+            Cmd::ConnectOk => {
+                if let Some(reply) = state.connect_replies.remove(&frame.stream_id) {
+                    let _ = reply.send(true);
+                }
+            }
+            Cmd::ConnectErr => {
+                warn!(
+                    "Stream {} connect error: {}",
+                    frame.stream_id,
+                    String::from_utf8_lossy(&frame.data)
+                );
+                if let Some(reply) = state.connect_replies.remove(&frame.stream_id) {
+                    let _ = reply.send(false);
+                }
+            }
+            Cmd::Data => {
+                if let Some(tx) = state.downstream_txs.get(&frame.stream_id) {
+                    if tx.send(frame.data).await.is_err() {
+                        state.downstream_txs.remove(&frame.stream_id);
+                    }
+                }
+            }
+            Cmd::Close => {
+                if let Some(tx) = state.downstream_txs.remove(&frame.stream_id) {
+                    let _ = tx.send(vec![]).await; // empty = close signal
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 // ─── SOCKS5 Handler ────────────────────────────────────────────
@@ -254,15 +348,16 @@ async fn handle_socks5(
     // Wait for connect result (with timeout)
     let connected = tokio::time::timeout(Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| "connect timeout")?
-        .map_err(|_| "connect reply dropped")?;
+        .map_err(|_| format!("connect timeout: {} did not respond in 15s (tunnel may be down)", addr))?
+        .map_err(|_| format!("connect reply dropped for {} (transport reconnecting?)", addr))?;
 
     if !connected {
         // Send SOCKS5 failure response
+        error!("[PHANTOM] Stream {} remote connect to {} FAILED", stream_id, addr);
         socket
             .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await?;
-        return Err("remote connect failed".into());
+        return Err(format!("remote connect to {} failed", addr).into());
     }
 
     // Send SOCKS5 success response
@@ -328,164 +423,4 @@ async fn handle_socks5(
 
     info!("Stream {} closed", stream_id);
     Ok(())
-}
-
-// ─── Central HTTP Polling Loop ─────────────────────────────────
-// This is the heart of the client. It collects upstream data from
-// all SOCKS5 handlers, sends it in a single HTTP POST, and dispatches
-// the response downstream to the appropriate handlers.
-
-async fn poller_loop(
-    client: Client,
-    server_url: String,
-    token: String,
-    key: [u8; 32],
-    mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
-    tunnel_state: Arc<Mutex<TunnelState>>,
-    poll_active: Duration,
-    poll_idle: Duration,
-) {
-    let sync_url = format!("{}/api/v1/lessons/sync", server_url);
-    let mut last_data = Instant::now();
-    let mut consecutive_empty: u32 = 0;
-
-    loop {
-        // Collect all pending upstream messages (non-blocking drain)
-        let mut upstream_frames = Vec::new();
-
-        // Try to receive at least one message (with timeout = poll interval)
-        let poll_interval = if consecutive_empty > 10 {
-            poll_idle
-        } else {
-            poll_active
-        };
-
-        match tokio::time::timeout(poll_interval, upstream_rx.recv()).await {
-            Ok(Some(msg)) => {
-                process_upstream_msg(msg, &mut upstream_frames, &tunnel_state).await;
-            }
-            Ok(None) => {
-                error!("Upstream channel closed, exiting poller");
-                return;
-            }
-            Err(_) => {} // timeout, just poll
-        }
-
-        // Drain any remaining messages (non-blocking)
-        while let Ok(msg) = upstream_rx.try_recv() {
-            process_upstream_msg(msg, &mut upstream_frames, &tunnel_state).await;
-        }
-
-        // Encode, encrypt, and send
-        let plaintext = encode_frames(&upstream_frames);
-        let encrypted = encrypt(&key, &plaintext);
-        let encoded = b64_encode(&encrypted);
-
-        let req_body = SyncRequest {
-            t: token.clone(),
-            d: encoded,
-        };
-
-        match client.post(&sync_url).json(&req_body).send().await {
-            Ok(resp) => {
-                if let Ok(sync_resp) = resp.json::<SyncResponse>().await {
-                    if let Ok(encrypted) = b64_decode(&sync_resp.d) {
-                        if let Ok(plaintext) = decrypt(&key, &encrypted) {
-                            if let Ok(frames) = decode_frames(&plaintext) {
-                                if !frames.is_empty() {
-                                    consecutive_empty = 0;
-                                    last_data = Instant::now();
-                                } else {
-                                    consecutive_empty =
-                                        consecutive_empty.saturating_add(1);
-                                }
-
-                                // Dispatch downstream frames
-                                dispatch_downstream(frames, &tunnel_state).await;
-                            }
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("Sync request failed: {}", e);
-                // Back off on error
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                consecutive_empty = 0;
-            }
-        }
-    }
-}
-
-async fn process_upstream_msg(
-    msg: UpstreamMsg,
-    frames: &mut Vec<Frame>,
-    tunnel_state: &Arc<Mutex<TunnelState>>,
-) {
-    match msg {
-        UpstreamMsg::Connect {
-            stream_id,
-            addr,
-            reply,
-        } => {
-            frames.push(Frame::connect(stream_id, &addr));
-            // Store the reply sender for when we get CONNECT_OK/ERR back
-            tunnel_state
-                .lock()
-                .await
-                .connect_replies
-                .insert(stream_id, reply);
-        }
-        UpstreamMsg::Data { stream_id, data } => {
-            // Split large data into multiple frames (max 65535 bytes per frame)
-            for chunk in data.chunks(32768) {
-                frames.push(Frame::data(stream_id, chunk.to_vec()));
-            }
-        }
-        UpstreamMsg::Close { stream_id } => {
-            frames.push(Frame::close(stream_id));
-        }
-    }
-}
-
-async fn dispatch_downstream(
-    frames: Vec<Frame>,
-    tunnel_state: &Arc<Mutex<TunnelState>>,
-) {
-    let mut state = tunnel_state.lock().await;
-
-    for frame in frames {
-        match frame.cmd {
-            Cmd::ConnectOk => {
-                if let Some(reply) = state.connect_replies.remove(&frame.stream_id)
-                {
-                    let _ = reply.send(true);
-                }
-            }
-            Cmd::ConnectErr => {
-                warn!(
-                    "Stream {} connect error: {}",
-                    frame.stream_id,
-                    String::from_utf8_lossy(&frame.data)
-                );
-                if let Some(reply) = state.connect_replies.remove(&frame.stream_id)
-                {
-                    let _ = reply.send(false);
-                }
-            }
-            Cmd::Data => {
-                if let Some(tx) = state.downstream_txs.get(&frame.stream_id) {
-                    if tx.send(frame.data).await.is_err() {
-                        state.downstream_txs.remove(&frame.stream_id);
-                    }
-                }
-            }
-            Cmd::Close => {
-                if let Some(tx) = state.downstream_txs.remove(&frame.stream_id) {
-                    let _ = tx.send(vec![]).await; // empty = close signal
-                }
-            }
-            _ => {}
-        }
-    }
 }

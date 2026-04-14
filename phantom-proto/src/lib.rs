@@ -281,6 +281,44 @@ pub fn b64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     B64.decode(s).map_err(|_| "invalid base64")
 }
 
+// ─── Traffic Padding ───────────────────────────────────────────
+// Pad payloads to fixed block sizes to prevent traffic analysis.
+// DPI can fingerprint tunnel protocols by message size distribution.
+// Padding normalizes sizes so traffic looks like a standard web app.
+
+/// Pad a payload to a multiple of `block_size` with random bytes.
+/// Format: [original_len: u32 LE] [payload] [random padding to block boundary]
+pub fn pad_payload(data: &[u8], block_size: usize) -> Vec<u8> {
+    let block_size = block_size.max(64); // minimum 64 byte blocks
+    let total_needed = 4 + data.len(); // 4 bytes for length prefix
+    let padded_len = ((total_needed + block_size - 1) / block_size) * block_size;
+
+    let mut out = Vec::with_capacity(padded_len);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(data);
+
+    // Fill remaining with random bytes
+    let pad_len = padded_len - total_needed;
+    if pad_len > 0 {
+        let mut padding = vec![0u8; pad_len];
+        OsRng.fill_bytes(&mut padding);
+        out.extend_from_slice(&padding);
+    }
+    out
+}
+
+/// Remove padding from a padded payload.
+pub fn unpad_payload(data: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if data.len() < 4 {
+        return Err("padded payload too short");
+    }
+    let len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if 4 + len > data.len() {
+        return Err("invalid padding length");
+    }
+    Ok(data[4..4 + len].to_vec())
+}
+
 // ─── Tests ─────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
