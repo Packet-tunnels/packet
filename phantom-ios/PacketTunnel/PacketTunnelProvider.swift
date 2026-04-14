@@ -33,6 +33,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         completionHandler()
     }
 
+    override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)? = nil) {
+        let command = String(data: messageData, encoding: .utf8)
+
+        switch command {
+        case "stats":
+            completionHandler?(TunnelRuntimeBridge.runtimeStatsData())
+        default:
+            completionHandler?(nil)
+        }
+    }
+
     private func startProviderTunnel() async throws {
         let configuration = try loadConfiguration()
         let port = try requireListenPort(from: configuration)
@@ -45,6 +56,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         try await waitForLocalProxy(port: port)
+        SharedTunnelLogStore.append("[EXT] Applying proxy-routed tunnel settings")
         try await applyNetworkSettings(makeNetworkSettings(for: configuration, port: port))
 
         SharedTunnelLogStore.append("[EXT] Packet tunnel settings applied")
@@ -86,34 +98,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: configuration.remoteAddress)
         settings.mtu = 1500
 
+        // The Rust core currently exposes a local SOCKS proxy. Do not publish
+        // default TUN routes here because packetFlow is not bridged yet.
         let ipv4Settings = NEIPv4Settings(addresses: ["10.8.0.2"], subnetMasks: ["255.255.255.255"])
-        ipv4Settings.includedRoutes = [NEIPv4Route.default()]
+        ipv4Settings.includedRoutes = []
         settings.ipv4Settings = ipv4Settings
 
         let ipv6Settings = NEIPv6Settings(
             addresses: ["fd84:306d:fc4e::2"],
             networkPrefixLengths: [64]
         )
-        ipv6Settings.includedRoutes = [NEIPv6Route.default()]
+        ipv6Settings.includedRoutes = []
         settings.ipv6Settings = ipv6Settings
 
-        let dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
-        dnsSettings.matchDomains = [""]
-        settings.dnsSettings = dnsSettings
-
         let proxySettings = NEProxySettings()
+        proxySettings.autoProxyConfigurationEnabled = true
+        proxySettings.proxyAutoConfigurationJavaScript = makeProxyAutoConfigurationScript(port: port)
         proxySettings.excludeSimpleHostnames = true
         proxySettings.matchDomains = [""]
-        proxySettings.exceptionList = ["127.0.0.1", "localhost"]
-        proxySettings.socksEnabled = true
-        proxySettings.socksServer = NEProxyServer(address: "127.0.0.1", port: Int(port))
+        proxySettings.exceptionList = configuration.proxyExceptionHosts
         settings.proxySettings = proxySettings
 
         return settings
     }
 
     private func applyNetworkSettings(_ settings: NEPacketTunnelNetworkSettings) async throws {
-        try await withCheckedThrowingContinuation { continuation in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             setTunnelNetworkSettings(settings) { error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -138,6 +148,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         throw PacketTunnelError.proxyNotReady
+    }
+
+    private func makeProxyAutoConfigurationScript(port: UInt16) -> String {
+        """
+        function FindProxyForURL(url, host) {
+            return "SOCKS5 127.0.0.1:\(port); SOCKS 127.0.0.1:\(port); DIRECT";
+        }
+        """
     }
 
     private func canConnectToLocalProxy(port: UInt16) -> Bool {

@@ -54,8 +54,14 @@ open phantom-ios/PhantomTunnel.xcodeproj
 
 ## Current scope
 
-The current app target is a test harness for the Rust client and live logs.
-It starts the Rust SOCKS5 client and shows output in SwiftUI.
+The iOS target now includes a `PacketTunnel` extension and starts the Rust client from inside the extension.
 
-It does **not** yet route all device traffic through iOS system VPN APIs.
-That next step requires a Packet Tunnel extension and the proper Apple VPN entitlement.
+Current behavior:
+
+- The Rust core still exposes a local SOCKS5 proxy and keeps the WebSocket/CDN bypass architecture unchanged.
+- The Packet Tunnel installs a PAC-based proxy configuration that points HTTP/HTTPS traffic at that local SOCKS5 listener.
+- The SwiftUI app shows live tunnel logs plus connection telemetry such as endpoint, ping, upload/download totals, throughput, and active stream counts.
+
+Current limitation:
+
+- The extension does **not** yet consume `packetFlow` packets directly, so this is not a full TUN-to-socket implementation. The iOS path is proxy-routed rather than raw packet forwarding.

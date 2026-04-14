@@ -1,13 +1,10 @@
-use crate::{start_client, start_client_with_config, ClientConfig, TransportMode};
-use std::ffi::CStr;
+use crate::{start_client, start_client_with_config, stats, ClientConfig, TransportMode};
+use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
 use std::thread;
 use tokio::runtime::Runtime;
 use tracing_subscriber::fmt::MakeWriter;
-
-#[cfg(not(target_os = "android"))]
-use std::ffi::CString;
 
 #[cfg(target_os = "android")]
 use jni::errors::Result as JniResult;
@@ -74,16 +71,16 @@ impl std::io::Write for NativeLogWriter {
 
         #[cfg(not(target_os = "android"))]
         {
-        let c_str =
-            CString::new(msg.as_ref()).unwrap_or_else(|_| CString::new("log error").unwrap());
+            let c_str =
+                CString::new(msg.as_ref()).unwrap_or_else(|_| CString::new("log error").unwrap());
 
-        if let Some(cb) = *LOG_CALLBACK.lock().unwrap() {
-            cb(c_str.as_ptr());
-        } else {
-            // Fallback to stdout if no callback set
-            print!("{}", msg);
-        }
-        Ok(buf.len())
+            if let Some(cb) = *LOG_CALLBACK.lock().unwrap() {
+                cb(c_str.as_ptr());
+            } else {
+                // Fallback to stdout if no callback set
+                print!("{}", msg);
+            }
+            Ok(buf.len())
         }
     }
 
@@ -115,6 +112,25 @@ pub extern "C" fn phantom_emit_test_output() {
     init_logging();
     tracing::info!("[PHANTOM] iOS test bridge is active");
     tracing::info!("[PHANTOM] Rust log callback delivered output to SwiftUI");
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_copy_stats_json() -> *mut c_char {
+    let json = stats::snapshot_json();
+    CString::new(json)
+        .unwrap_or_else(|_| CString::new("{}").unwrap())
+        .into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_free_string(value: *mut c_char) {
+    if value.is_null() {
+        return;
+    }
+
+    unsafe {
+        let _ = CString::from_raw(value);
+    }
 }
 
 // ─── C API (iOS & General FFI) ─────────────────────────────────
@@ -241,7 +257,7 @@ pub mod android {
     use jni::errors::LogErrorAndDefault;
     use jni::objects::{JClass, JObject};
     use jni::sys::jint;
-    use jni::{EnvUnowned, objects::JString};
+    use jni::{objects::JString, EnvUnowned};
 
     #[no_mangle]
     pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_setLogCallback(

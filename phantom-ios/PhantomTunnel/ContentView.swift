@@ -4,9 +4,15 @@ struct ContentView: View {
     @StateObject private var tunnelManager = TunnelManager()
     @ObservedObject private var logManager = LogManager.shared
 
+    private let metricColumns = [
+        GridItem(.flexible(), spacing: 12),
+        GridItem(.flexible(), spacing: 12)
+    ]
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                connectionOverviewView
                 configurationView
                 advancedConfigView
                 logsView
@@ -21,6 +27,102 @@ struct ContentView: View {
         .scrollDismissesKeyboard(.interactively)
         .safeAreaInset(edge: .bottom) {
             executeButton
+        }
+    }
+
+    private var connectionOverviewView: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Connection")
+                        .font(.headline)
+
+                    HStack(spacing: 8) {
+                        statusChip
+
+                        Text(tunnelManager.telemetry.transportLabel)
+                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+            }
+
+            LazyVGrid(columns: metricColumns, spacing: 12) {
+                metricCard(
+                    title: "Country",
+                    value: tunnelManager.telemetry.countryLabel,
+                    detail: tunnelManager.telemetry.serverLabel
+                )
+                metricCard(
+                    title: "Endpoint",
+                    value: tunnelManager.telemetry.endpointLabel,
+                    detail: tunnelManager.configuration.remoteAddress
+                )
+                metricCard(
+                    title: "Ping",
+                    value: pingText,
+                    detail: "Round-trip"
+                )
+                metricCard(
+                    title: "Streams",
+                    value: "\(tunnelManager.telemetry.snapshot.activeStreams)",
+                    detail: "Total \(tunnelManager.telemetry.snapshot.totalStreams)"
+                )
+                metricCard(
+                    title: "Download",
+                    value: totalBytesText(tunnelManager.telemetry.snapshot.bytesDown),
+                    detail: speedText(tunnelManager.telemetry.downloadRateBps)
+                )
+                metricCard(
+                    title: "Upload",
+                    value: totalBytesText(tunnelManager.telemetry.snapshot.bytesUp),
+                    detail: speedText(tunnelManager.telemetry.uploadRateBps)
+                )
+            }
+
+            Text(tunnelManager.lastResult)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+
+            if tunnelManager.telemetry.isWaitingForTraffic {
+                Text("Tunnel session is established. Waiting for iOS app traffic to reach the local SOCKS proxy.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+            if let lastError = tunnelManager.telemetry.snapshot.lastError, !lastError.isEmpty {
+                Text(lastError)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(18)
+        .background(Color(.secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var statusChip: some View {
+        Text(tunnelManager.state.rawValue)
+            .font(.system(size: 11, weight: .semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .foregroundStyle(statusColor)
+            .background(statusColor.opacity(0.15))
+            .clipShape(Capsule())
+    }
+
+    private var statusColor: Color {
+        switch tunnelManager.state {
+        case .idle:
+            return .secondary
+        case .launching:
+            return .orange
+        case .running:
+            return .green
+        case .failed:
+            return .red
         }
     }
 
@@ -181,5 +283,52 @@ struct ContentView: View {
         .padding(18)
         .background(Color(.secondarySystemBackground))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func metricCard(title: String, value: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 9, weight: .medium))
+                .tracking(1.5)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            Text(value)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+
+            Text(detail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, minHeight: 86, alignment: .leading)
+        .padding(14)
+        .background(Color(.tertiarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var pingText: String {
+        if let ping = tunnelManager.telemetry.snapshot.lastPingMs {
+            return "\(ping) ms"
+        }
+
+        return "--"
+    }
+
+    private func totalBytesText(_ bytes: UInt64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .binary
+        formatter.includesUnit = true
+        formatter.isAdaptive = true
+        return formatter.string(fromByteCount: Int64(bytes))
+    }
+
+    private func speedText(_ bytesPerSecond: Double) -> String {
+        let clampedRate = max(bytesPerSecond, 0)
+        return "\(totalBytesText(UInt64(clampedRate)))/s"
     }
 }

@@ -102,6 +102,23 @@ struct TunnelConfiguration: Equatable {
             .map(String.init) ?? "127.0.0.1"
     }
 
+    var proxyExceptionHosts: [String] {
+        var hosts = ["127.0.0.1", "localhost", remoteAddress]
+
+        if !normalizedCDNEdge.isEmpty {
+            let edgeHost = normalizedCDNEdge
+                .split(separator: ":")
+                .first
+                .map(String.init)
+
+            if let edgeHost, !edgeHost.isEmpty {
+                hosts.append(edgeHost)
+            }
+        }
+
+        return Array(Set(hosts.filter { !$0.isEmpty }))
+    }
+
     var providerConfiguration: [String: Any] {
         [
             TunnelProviderKeys.serverURL: normalizedServerURL,
@@ -115,6 +132,31 @@ struct TunnelConfiguration: Equatable {
 
     private static func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+struct TunnelRuntimeSnapshot: Decodable, Equatable {
+    var state = "idle"
+    var transport = "Auto"
+    var serverHost = ""
+    var cdnEdge: String?
+    var bytesUp: UInt64 = 0
+    var bytesDown: UInt64 = 0
+    var activeStreams: UInt32 = 0
+    var totalStreams: UInt64 = 0
+    var connectedSince: UInt64?
+    var lastPingMs: UInt32?
+    var lastError: String?
+    var tunnelActive = false
+
+    static let empty = TunnelRuntimeSnapshot()
+
+    var endpointHost: String {
+        if let cdnEdge, !cdnEdge.isEmpty {
+            return cdnEdge
+        }
+
+        return serverHost
     }
 }
 
@@ -195,6 +237,27 @@ enum TunnelRuntimeBridge {
                 return phantom_start(serverURLPointer, secretPointer, listenPort)
             }
         }
+    }
+
+    static func runtimeSnapshot() -> TunnelRuntimeSnapshot? {
+        guard let jsonData = runtimeStatsData() else {
+            return nil
+        }
+
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(TunnelRuntimeSnapshot.self, from: jsonData)
+    }
+
+    static func runtimeStatsData() -> Data? {
+        guard let rawPointer = phantom_copy_stats_json() else {
+            return nil
+        }
+        defer {
+            phantom_free_string(rawPointer)
+        }
+
+        return String(cString: rawPointer).data(using: .utf8)
     }
 
     private static func withOptionalCString<T>(

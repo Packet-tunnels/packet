@@ -6,6 +6,8 @@
 // Set log callback to intercept Rust logs
 void phantom_set_log_callback(void (*cb)(const char*));
 void phantom_emit_test_output(void);
+char *phantom_copy_stats_json(void);
+void phantom_free_string(char *value);
 
 // Basic start
 int32_t phantom_start(

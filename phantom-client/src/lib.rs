@@ -12,6 +12,7 @@
 
 pub mod ffi;
 pub(crate) mod fragment;
+pub(crate) mod stats;
 pub(crate) mod transport;
 
 use phantom_proto::*;
@@ -109,6 +110,7 @@ pub async fn start_client(server_url: String, secret: String, listen: String) {
 
 /// Start the client with full configuration.
 pub async fn start_client_with_config(config: ClientConfig) {
+    stats::reset(&config);
     let key = derive_key(&config.secret);
     let server_url = config.server_url.trim_end_matches('/').to_string();
 
@@ -117,7 +119,10 @@ pub async fn start_client_with_config(config: ClientConfig) {
     info!("[PHANTOM] Server: {}", server_url);
     info!("[PHANTOM] Transport: {:?}", config.transport);
     info!("[PHANTOM] SOCKS5 proxy: {}", config.listen);
-    info!("[PHANTOM] Padding: {}", if config.padding { "ON" } else { "OFF" });
+    info!(
+        "[PHANTOM] Padding: {}",
+        if config.padding { "ON" } else { "OFF" }
+    );
     if let Some(ref edge) = config.cdn_edge {
         info!("[PHANTOM] CDN edge: {}", edge);
     }
@@ -125,7 +130,10 @@ pub async fn start_client_with_config(config: ClientConfig) {
         info!("[PHANTOM] Host override: {}", host);
     }
     if config.fragment {
-        info!("[PHANTOM] TLS fragment: ON ({}B chunks)", config.fragment_size);
+        info!(
+            "[PHANTOM] TLS fragment: ON ({}B chunks)",
+            config.fragment_size
+        );
     }
     info!("[PHANTOM] ═══════════════════════════════════════");
 
@@ -152,6 +160,7 @@ pub async fn start_client_with_config(config: ClientConfig) {
 
     // Spawn the transport loop (WebSocket, HTTP, or Auto)
     info!("[PHANTOM] Launching transport...");
+    stats::set_state("connecting");
     let transport_state = tunnel_state.clone();
     tokio::spawn(async move {
         transport::run_transport(transport_config, upstream_rx, transport_state).await;
@@ -161,7 +170,10 @@ pub async fn start_client_with_config(config: ClientConfig) {
     let listener = match TcpListener::bind(&config.listen).await {
         Ok(l) => l,
         Err(e) => {
-            error!("[PHANTOM] ❌ Failed to bind SOCKS5 on {}: {} (port in use?)", config.listen, e);
+            error!(
+                "[PHANTOM] ❌ Failed to bind SOCKS5 on {}: {} (port in use?)",
+                config.listen, e
+            );
             return;
         }
     };
@@ -209,6 +221,7 @@ pub(crate) async fn process_upstream_msg(
                 .insert(stream_id, reply);
         }
         UpstreamMsg::Data { stream_id, data } => {
+            stats::note_upstream_bytes(data.len());
             // Split large data into multiple frames (max 65535 bytes per frame)
             for chunk in data.chunks(32768) {
                 frames.push(Frame::data(stream_id, chunk.to_vec()));
@@ -245,6 +258,7 @@ pub(crate) async fn dispatch_downstream(
                 }
             }
             Cmd::Data => {
+                stats::note_downstream_bytes(frame.data.len());
                 if let Some(tx) = state.downstream_txs.get(&frame.stream_id) {
                     if tx.send(frame.data).await.is_err() {
                         state.downstream_txs.remove(&frame.stream_id);
@@ -302,8 +316,7 @@ async fn handle_socks5(
                 return Err("truncated domain".into());
             }
             let domain = std::str::from_utf8(&buf[5..5 + dlen])?;
-            let port =
-                u16::from_be_bytes([buf[5 + dlen], buf[5 + dlen + 1]]);
+            let port = u16::from_be_bytes([buf[5 + dlen], buf[5 + dlen + 1]]);
             format!("{}:{}", domain, port)
         }
         // IPv6
@@ -322,6 +335,7 @@ async fn handle_socks5(
         _ => return Err("unknown ATYP".into()),
     };
 
+    let _stream_activity = stats::track_stream();
     info!("Stream {} CONNECT to {}", stream_id, addr);
 
     // Create downstream channel for this stream
@@ -348,12 +362,25 @@ async fn handle_socks5(
     // Wait for connect result (with timeout)
     let connected = tokio::time::timeout(Duration::from_secs(15), reply_rx)
         .await
-        .map_err(|_| format!("connect timeout: {} did not respond in 15s (tunnel may be down)", addr))?
-        .map_err(|_| format!("connect reply dropped for {} (transport reconnecting?)", addr))?;
+        .map_err(|_| {
+            format!(
+                "connect timeout: {} did not respond in 15s (tunnel may be down)",
+                addr
+            )
+        })?
+        .map_err(|_| {
+            format!(
+                "connect reply dropped for {} (transport reconnecting?)",
+                addr
+            )
+        })?;
 
     if !connected {
         // Send SOCKS5 failure response
-        error!("[PHANTOM] Stream {} remote connect to {} FAILED", stream_id, addr);
+        error!(
+            "[PHANTOM] Stream {} remote connect to {} FAILED",
+            stream_id, addr
+        );
         socket
             .write_all(&[0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await?;

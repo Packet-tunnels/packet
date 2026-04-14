@@ -15,7 +15,7 @@
 // 3. WebSocket upgrade looks like a normal web application feature
 // 4. ArvanCloud specifically supports WebSocket forwarding
 
-use crate::{dispatch_downstream, process_upstream_msg, TunnelState, UpstreamMsg};
+use crate::{dispatch_downstream, process_upstream_msg, stats, TunnelState, UpstreamMsg};
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
 use reqwest::Client;
@@ -72,11 +72,12 @@ impl TransportConfig {
                 format!("{}:{}", edge, port)
             }
         } else {
-            let url = url::Url::parse(&self.server_url).unwrap_or_else(|_| {
-                url::Url::parse("http://127.0.0.1").unwrap()
-            });
+            let url = url::Url::parse(&self.server_url)
+                .unwrap_or_else(|_| url::Url::parse("http://127.0.0.1").unwrap());
             let host = url.host_str().unwrap_or("127.0.0.1");
-            let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+            let port = url
+                .port()
+                .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
             format!("{}:{}", host, port)
         }
     }
@@ -140,23 +141,30 @@ async fn run_ws_loop(
     loop {
         let addr = config.connect_addr();
         let host = config.host_value();
+        stats::set_state("connecting");
         info!(
             "[PHANTOM] WS connecting: addr={} host={} cdn_edge={:?} tls={}",
-            addr, host, config.cdn_edge, config.is_tls()
+            addr,
+            host,
+            config.cdn_edge,
+            config.is_tls()
         );
 
         match ws_session(&config, &mut upstream_rx, &tunnel_state).await {
             Ok(()) => {
+                stats::mark_transport_disconnected(None);
                 warn!("[PHANTOM] WebSocket session ended gracefully, reconnecting in 500ms...");
                 retry_count = 0;
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
+                let message = e.to_string();
+                stats::mark_transport_disconnected(Some(message.clone()));
                 retry_count += 1;
                 let delay = std::cmp::min(2u64.pow(retry_count.min(5)), 30);
                 error!(
                     "[PHANTOM] ❌ WS FAILED: {} | retry #{} in {}s | addr={} host={}",
-                    e, retry_count, delay, addr, host
+                    message, retry_count, delay, addr, host
                 );
                 tokio::time::sleep(Duration::from_secs(delay)).await;
             }
@@ -195,19 +203,34 @@ async fn ws_session(
     // Establish TCP connection to server (or CDN edge)
     info!("[PHANTOM] TCP connecting to {}...", connect_addr);
     let tcp = TcpStream::connect(&connect_addr).await.map_err(|e| {
-        format!("TCP connect to {} failed: {} (is the server/CDN reachable?)", connect_addr, e)
+        format!(
+            "TCP connect to {} failed: {} (is the server/CDN reachable?)",
+            connect_addr, e
+        )
     })?;
     let _ = tcp.set_nodelay(true);
     info!("[PHANTOM] ✓ TCP connected to {}", connect_addr);
 
     // WebSocket handshake over the raw TCP stream
     // For CDN mode: the Host header tells ArvanCloud which origin to forward to
-    info!("[PHANTOM] WS handshake: upgrade request to {} via {}", ws_uri, connect_addr);
+    info!(
+        "[PHANTOM] WS handshake: upgrade request to {} via {}",
+        ws_uri, connect_addr
+    );
     let (ws_stream, response) = tokio_tungstenite::client_async(request, tcp)
         .await
-        .map_err(|e| format!("WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)", host, connect_addr, e))?;
+        .map_err(|e| {
+            format!(
+                "WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)",
+                host, connect_addr, e
+            )
+        })?;
 
-    info!("[PHANTOM] ✓ WebSocket connected — HTTP {} from {}", response.status(), host);
+    info!(
+        "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",
+        response.status(),
+        host
+    );
 
     // Authenticate and start relay
     ws_auth_and_relay(ws_stream, config, upstream_rx, tunnel_state).await
@@ -226,18 +249,24 @@ where
 {
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
     let key = config.key;
+    let ping_payload = vec![0x50, 0x54];
 
     // ── Authenticate ──
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)?
-        .as_secs();
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sig = sign_auth(&config.secret, ts);
     let auth_json = serde_json::json!({"ts": ts, "sig": sig}).to_string();
+    let auth_started_at = Instant::now();
 
     info!("[PHANTOM] Sending auth (ts={})...", ts);
-    ws_sender.send(Message::Text(auth_json)).await.map_err(|e| {
-        format!("Failed to send auth message: {} (connection died before auth)", e)
-    })?;
+    ws_sender
+        .send(Message::Text(auth_json))
+        .await
+        .map_err(|e| {
+            format!(
+                "Failed to send auth message: {} (connection died before auth)",
+                e
+            )
+        })?;
 
     // Wait for auth response
     info!("[PHANTOM] Waiting for auth response (10s timeout)...");
@@ -250,19 +279,32 @@ where
     match auth_resp {
         Message::Text(text) => {
             let json: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
-                format!("Auth response not JSON: {} — raw response: '{}'", e, &text[..text.len().min(200)])
+                format!(
+                    "Auth response not JSON: {} — raw response: '{}'",
+                    e,
+                    &text[..text.len().min(200)]
+                )
             })?;
             if let Some(err) = json.get("error") {
-                return Err(format!("❌ Auth REJECTED by server: {} (check secret matches & clock sync)", err).into());
+                return Err(format!(
+                    "❌ Auth REJECTED by server: {} (check secret matches & clock sync)",
+                    err
+                )
+                .into());
             }
             let token = json["token"].as_str().unwrap_or("unknown");
             info!(
                 "[PHANTOM] ✓ Authenticated — session: {}...",
                 &token[..token.len().min(16)]
             );
+            stats::note_ping(auth_started_at.elapsed().as_millis().min(u32::MAX as u128) as u32);
         }
         other => {
-            return Err(format!("Unexpected auth response type: {:?} (expected Text JSON)", other).into());
+            return Err(format!(
+                "Unexpected auth response type: {:?} (expected Text JSON)",
+                other
+            )
+            .into());
         }
     }
 
@@ -271,9 +313,21 @@ where
     // downstream (WS→SOCKS5) without spawning tasks. This keeps
     // upstream_rx borrowed (not moved) for reconnection support.
     info!("[PHANTOM] ✓ TUNNEL ACTIVE — relay is live");
+    stats::mark_transport_connected();
+
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(15));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_interval.tick().await;
+    let mut last_ping_sent_at: Option<Instant> = None;
 
     loop {
         tokio::select! {
+            _ = ping_interval.tick() => {
+                last_ping_sent_at = Some(Instant::now());
+                ws_sender.send(Message::Ping(ping_payload.clone())).await
+                    .map_err(|e| format!("WS ping failed: {} (connection to CDN/server dropped)", e))?;
+            }
+
             // Upstream: SOCKS5 handlers → encrypt → WebSocket → CDN → server
             msg = upstream_rx.recv() => {
                 match msg {
@@ -320,7 +374,15 @@ where
                             }
                         }
                     }
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
+                    Some(Ok(Message::Ping(_))) => continue,
+                    Some(Ok(Message::Pong(payload))) => {
+                        if payload == ping_payload {
+                            if let Some(sent_at) = last_ping_sent_at.take() {
+                                stats::note_ping(sent_at.elapsed().as_millis().min(u32::MAX as u128) as u32);
+                            }
+                        }
+                        continue;
+                    }
                     Some(Ok(Message::Close(reason))) => {
                         info!("[PHANTOM] WebSocket closed by server: {:?}", reason);
                         return Ok(());
@@ -365,13 +427,17 @@ async fn run_http_loop(
         match http_authenticate(&http_client, &config).await {
             Ok(t) => break t,
             Err(e) => {
-                error!("[PHANTOM] ❌ HTTP auth failed: {} | server={} | retrying in 5s...", e, config.server_url);
+                error!(
+                    "[PHANTOM] ❌ HTTP auth failed: {} | server={} | retrying in 5s...",
+                    e, config.server_url
+                );
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
     };
 
     info!("HTTP authenticated: {}...", &token[..16]);
+    stats::mark_transport_connected();
 
     let sync_url = format!("{}/api/v1/lessons/sync", config.server_url);
     let key = config.key;
@@ -420,36 +486,37 @@ async fn run_http_loop(
                 let status = resp.status();
                 match resp.json::<SyncResponse>().await {
                     Ok(sync_resp) => {
+                        stats::mark_transport_connected();
                         match b64_decode(&sync_resp.d) {
-                            Ok(encrypted) => {
-                                match decrypt(&key, &encrypted) {
-                                    Ok(plaintext) => {
-                                        match decode_frames(&plaintext) {
-                                            Ok(frames) => {
-                                                if !frames.is_empty() {
-                                                    consecutive_empty = 0;
-                                                    _last_data = Instant::now();
-                                                } else {
-                                                    consecutive_empty =
-                                                        consecutive_empty.saturating_add(1);
-                                                }
-                                                dispatch_downstream(frames, &tunnel_state).await;
-                                            }
-                                            Err(e) => error!("[PHANTOM] Frame decode error: {}", e),
+                            Ok(encrypted) => match decrypt(&key, &encrypted) {
+                                Ok(plaintext) => match decode_frames(&plaintext) {
+                                    Ok(frames) => {
+                                        if !frames.is_empty() {
+                                            consecutive_empty = 0;
+                                            _last_data = Instant::now();
+                                        } else {
+                                            consecutive_empty = consecutive_empty.saturating_add(1);
                                         }
+                                        dispatch_downstream(frames, &tunnel_state).await;
                                     }
-                                    Err(e) => error!("[PHANTOM] Decrypt error: {} (key mismatch?)", e),
-                                }
-                            }
+                                    Err(e) => error!("[PHANTOM] Frame decode error: {}", e),
+                                },
+                                Err(e) => error!("[PHANTOM] Decrypt error: {} (key mismatch?)", e),
+                            },
                             Err(e) => error!("[PHANTOM] Base64 decode error: {}", e),
                         }
                     }
                     Err(e) => {
-                        error!("[PHANTOM] Sync response parse error: {} (HTTP {})", e, status);
+                        error!(
+                            "[PHANTOM] Sync response parse error: {} (HTTP {})",
+                            e, status
+                        );
                     }
                 }
             }
             Err(e) => {
+                stats::set_state("reconnecting");
+                stats::set_error(e.to_string());
                 error!("[PHANTOM] ❌ Sync request failed: {} | url={}", e, sync_url);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 consecutive_empty = 0;
@@ -459,10 +526,7 @@ async fn run_http_loop(
 }
 
 /// HTTP authentication — POST to /api/v1/auth/login
-async fn http_authenticate(
-    client: &Client,
-    config: &TransportConfig,
-) -> Result<String, String> {
+async fn http_authenticate(client: &Client, config: &TransportConfig) -> Result<String, String> {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -507,15 +571,22 @@ async fn run_auto_loop(
 
     loop {
         if ws_failures < 5 {
-            info!("[PHANTOM] Auto mode: trying WebSocket (attempt {}/5) to {}", ws_failures + 1, config.connect_addr());
+            stats::set_state("connecting");
+            info!(
+                "[PHANTOM] Auto mode: trying WebSocket (attempt {}/5) to {}",
+                ws_failures + 1,
+                config.connect_addr()
+            );
             match ws_session(&config, &mut upstream_rx, &tunnel_state).await {
                 Ok(()) => {
+                    stats::mark_transport_disconnected(None);
                     ws_failures = 0;
                     info!("[PHANTOM] WS session ended, reconnecting...");
                     tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
                 Err(e) => {
+                    stats::mark_transport_disconnected(Some(e.to_string()));
                     ws_failures += 1;
                     error!("[PHANTOM] ❌ Auto WS failed #{}/5: {}", ws_failures, e);
                     tokio::time::sleep(Duration::from_secs(2)).await;
