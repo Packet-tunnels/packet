@@ -1,0 +1,61 @@
+name: PhantomTunnel
+options:
+  bundleIdPrefix: com.resolo.phantom
+targets:
+  PhantomTunnel:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - PhantomTunnel
+      - SharedTunnel
+    dependencies:
+      - target: PacketTunnel
+        embed: true
+    settings:
+      CODE_SIGN_STYLE: Automatic
+      CODE_SIGN_IDENTITY: "Apple Development"
+      CODE_SIGN_ENTITLEMENTS: PhantomTunnel/PhantomTunnel.entitlements
+      GENERATE_INFOPLIST_FILE: YES
+      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.phantom.PhantomTunnel
+      SWIFT_VERSION: 5.0
+      SWIFT_OBJC_BRIDGING_HEADER: PhantomTunnel/PhantomTunnel-Bridging-Header.h
+      "OTHER_LDFLAGS[sdk=iphoneos*][arch=arm64]":
+        - "$(SRCROOT)/../target/aarch64-apple-ios/release/libphantom_client.a"
+        - "-lresolv"
+      "OTHER_LDFLAGS[sdk=iphonesimulator*][arch=arm64]":
+        - "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libphantom_client.a"
+        - "-lresolv"
+      "OTHER_LDFLAGS[sdk=iphonesimulator*][arch=x86_64]":
+        - "$(SRCROOT)/../target/x86_64-apple-ios/release/libphantom_client.a"
+        - "-lresolv"
+      ENABLE_BITCODE: NO
+  PacketTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - PacketTunnel
+      - SharedTunnel
+    settings:
+      APPLICATION_EXTENSION_API_ONLY: YES
+      CODE_SIGN_STYLE: Automatic
+      CODE_SIGN_IDENTITY: "Apple Development"
+      CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
+      GENERATE_INFOPLIST_FILE: NO
+      INFOPLIST_FILE: PacketTunnel/Info.plist
+      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.phantom.PacketTunnel
+      PRODUCT_NAME: PacketTunnel
+      SKIP_INSTALL: YES
+      SWIFT_VERSION: 5.0
+      SWIFT_OBJC_BRIDGING_HEADER: PhantomTunnel/PhantomTunnel-Bridging-Header.h
+      "OTHER_LDFLAGS[sdk=iphoneos*][arch=arm64]":
+        - "$(SRCROOT)/../target/aarch64-apple-ios/release/libphantom_client.a"
+        - "-lresolv"
+      "OTHER_LDFLAGS[sdk=iphonesimulator*][arch=arm64]":
+        - "$(SRCROOT)/../target/aarch64-apple-ios-sim/release/libphantom_client.a"
+        - "-lresolv"
+      "OTHER_LDFLAGS[sdk=iphonesimulator*][arch=x86_64]":
+        - "$(SRCROOT)/../target/x86_64-apple-ios/release/libphantom_client.a"
+        - "-lresolv"
+      ENABLE_BITCODE: NO
