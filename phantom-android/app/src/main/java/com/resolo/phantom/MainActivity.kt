@@ -73,6 +73,9 @@ class MainActivity : Activity() {
     private lateinit var metricUploadDetail: TextView
     private lateinit var settingsButton: ImageButton
     private lateinit var startButton: Button
+    private lateinit var logsMetaText: TextView
+    private lateinit var toggleLogsButton: Button
+    private lateinit var logsContent: View
     private lateinit var logsView: TextView
     private lateinit var logsScrollView: ScrollView
     private lateinit var bottomBar: View
@@ -81,6 +84,7 @@ class MainActivity : Activity() {
     private var pendingStartAfterPermission = false
     private var receiverRegistered = false
     private var rateAnchor: RuntimeRateAnchor? = null
+    private var logsCollapsed = true
 
     private val logCallback = object : PhantomTunnel.LogCallback {
         override fun onLog(message: String) {
@@ -144,6 +148,9 @@ class MainActivity : Activity() {
         metricUploadDetail = findViewById(R.id.metricUploadDetail)
         settingsButton = findViewById(R.id.settingsButton)
         startButton = findViewById(R.id.startButton)
+        logsMetaText = findViewById(R.id.logsMetaText)
+        toggleLogsButton = findViewById(R.id.toggleLogsButton)
+        logsContent = findViewById(R.id.logsContent)
         logsView = findViewById(R.id.logsView)
         logsScrollView = findViewById(R.id.logsScrollView)
         bottomBar = findViewById(R.id.bottomBar)
@@ -164,6 +171,10 @@ class MainActivity : Activity() {
 
         settingsButton.setOnClickListener {
             showSettingsDialog()
+        }
+
+        toggleLogsButton.setOnClickListener {
+            setLogsCollapsed(!logsCollapsed)
         }
 
         startButton.setOnTouchListener { view, event ->
@@ -197,6 +208,7 @@ class MainActivity : Activity() {
             logsView.breakStrategy = Layout.BREAK_STRATEGY_HIGH_QUALITY
             logsView.hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
         }
+        setLogsCollapsed(logsCollapsed)
     }
 
     override fun onStart() {
@@ -476,15 +488,29 @@ class MainActivity : Activity() {
 
     private fun renderLogs() {
         val logs = TunnelLogStore.load(this)
+        logsMetaText.text = when {
+            logs.isEmpty() -> "No logs yet"
+            logsCollapsed -> "${logs.size} lines hidden"
+            else -> "${logs.size} lines"
+        }
         logsView.text = if (logs.isEmpty()) {
             "No logs yet."
         } else {
             logs.joinToString(separator = "\n") { formatLogLineForDisplay(it) }
         }
 
-        logsScrollView.post {
-            logsScrollView.fullScroll(View.FOCUS_DOWN)
+        if (!logsCollapsed) {
+            logsScrollView.post {
+                logsScrollView.scrollTo(0, logsView.bottom)
+            }
         }
+    }
+
+    private fun setLogsCollapsed(collapsed: Boolean) {
+        logsCollapsed = collapsed
+        logsContent.visibility = if (collapsed) View.GONE else View.VISIBLE
+        toggleLogsButton.text = if (collapsed) "Show" else "Hide"
+        renderLogs()
     }
 
     private fun renderStatusPanel(
@@ -796,6 +822,8 @@ class MainActivity : Activity() {
         ) {
             return "Listen port must be 1024-65535, or leave it blank for auto."
         }
+
+        configuration.cdnEdgeValidationError?.let { return it }
 
         if (configuration.normalizedSniOverride.isNotEmpty() &&
             !configuration.normalizedServerUrl.startsWith("https://", ignoreCase = true)

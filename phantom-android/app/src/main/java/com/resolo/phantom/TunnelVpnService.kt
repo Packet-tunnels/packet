@@ -202,7 +202,7 @@ class TunnelVpnService : VpnService() {
         )
         TunnelLogStore.append(
             this,
-            "[DIAG] UDP-heavy traffic may degrade until SOCKS UDP relay support is added end-to-end",
+            "[DIAG] UDP and Android Private DNS are not supported end-to-end yet; UDP-heavy apps may fail or retry repeatedly",
         )
 
         TunnelPreferences.updateDiagnostics(
@@ -522,7 +522,7 @@ class TunnelVpnService : VpnService() {
             parts.add(
                 "Full-device forwarding is active. Device traffic is routed through tun2socks into $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
             )
-            parts.add("UDP-heavy traffic may still degrade until SOCKS UDP relay support is added end-to-end.")
+            parts.add("UDP and Android Private DNS are not supported end-to-end yet, so some apps may fail or retry.")
         } else if (diagnostics.localProxyReady) {
             parts.add("Local SOCKS5 proxy is ready on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}, but the Android tun bridge is not up yet.")
         }
@@ -576,6 +576,8 @@ class TunnelVpnService : VpnService() {
         ) {
             return "Listen port must be 1024-65535, or leave it blank for auto."
         }
+
+        configuration.cdnEdgeValidationError?.let { return it }
 
         if (configuration.normalizedSniOverride.isNotEmpty() &&
             !configuration.normalizedServerUrl.startsWith("https://", ignoreCase = true)

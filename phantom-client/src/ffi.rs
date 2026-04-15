@@ -323,7 +323,7 @@ pub extern "C" fn phantom_start_cdn(
         transport,
         cdn_edge: edge,
         host_override: host,
-        fragment: false,
+        fragment: true,     // <-- ENABLED FOR IR DPI BYPASS
         fragment_size: 40,
         padding: true,
         sni_override: None,
@@ -461,7 +461,7 @@ pub mod android {
                 transport,
                 cdn_edge: edge,
                 host_override: host,
-                fragment: false,
+                fragment: true,     // <-- ENABLED FOR IR DPI BYPASS
                 fragment_size: 40,
                 padding: true,
                 sni_override: None,
@@ -520,7 +520,7 @@ pub mod android {
                 cdn_edge: edge,
                 host_override: host,
                 sni_override: sni,
-                fragment: false,
+                fragment: true,     // <-- ENABLED FOR IR DPI BYPASS
                 fragment_size: 40,
                 padding: true,
             };

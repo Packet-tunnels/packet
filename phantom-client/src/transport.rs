@@ -204,9 +204,16 @@ async fn ws_session(
     let ws_uri = format!("{}://{}/api/v1/lessons/live", ws_scheme, host);
     let ws_key = tokio_tungstenite::tungstenite::handshake::client::generate_key();
 
+    let origin = if config.is_tls() {
+        format!("https://{}", host)
+    } else {
+        format!("http://{}", host)
+    };
+
     let request = http::Request::builder()
         .uri(&ws_uri)
         .header("Host", &host)
+        .header("Origin", origin)
         .header("Connection", "Upgrade")
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
@@ -256,9 +263,13 @@ async fn ws_session(
             "[PHANTOM] WS handshake: upgrade request to {} via TLS",
             ws_uri
         );
-        let (ws_stream, response) = tokio_tungstenite::client_async(request, tls_stream)
-            .await
-            .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+        let (ws_stream, response) = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_tungstenite::client_async(request, tls_stream)
+        )
+        .await
+        .map_err(|_| "WebSocket TLS handshake timed out (DPI blackhole or CDN drop)")?
+        .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
 
         info!(
             "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",
@@ -272,9 +283,13 @@ async fn ws_session(
             "[PHANTOM] WS handshake: upgrade request to {} via plain HTTP transport",
             ws_uri
         );
-        let (ws_stream, response) = tokio_tungstenite::client_async(request, tcp)
-            .await
-            .map_err(|e| format!("WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)", host, connect_addr, e))?;
+        let (ws_stream, response) = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_tungstenite::client_async(request, tcp)
+        )
+        .await
+        .map_err(|_| "WebSocket plaintext handshake timed out (DPI blackhole or CDN drop)")?
+        .map_err(|e| format!("WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)", host, connect_addr, e))?;
 
         info!(
             "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",

@@ -59,6 +59,33 @@ data class TunnelConfiguration(
     val normalizedSniOverride: String
         get() = sniOverride.trim()
 
+    val cdnEdgeValidationError: String?
+        get() {
+            val edge = normalizedCdnEdge
+            if (edge.isEmpty()) {
+                return null
+            }
+
+            if (edge.all(Char::isDigit)) {
+                return "CDN edge must be a host or IP, optionally with :port. If you only need a custom origin port, add it to Server URL instead."
+            }
+
+            if (edge.startsWith(":") || edge.endsWith(":")) {
+                return "CDN edge must look like 185.143.234.235:80 or edge.example.ir."
+            }
+
+            val lastColonIndex = edge.lastIndexOf(':')
+            if (lastColonIndex > 0 && edge.indexOf(':') == lastColonIndex) {
+                val port = edge.substring(lastColonIndex + 1)
+                val portValue = port.toIntOrNull()
+                if (port.any { !it.isDigit() } || portValue == null || portValue !in 1..65535) {
+                    return "CDN edge port must be between 1 and 65535."
+                }
+            }
+
+            return null
+        }
+
     val usesCdn: Boolean
         get() = normalizedCdnEdge.isNotEmpty() ||
             normalizedHostOverride.isNotEmpty() ||
@@ -98,12 +125,24 @@ data class TunnelConfiguration(
 
     val endpointHost: String
         get() {
+            if (cdnEdgeValidationError != null) {
+                return serverHost
+            }
             val edgeHost = normalizedCdnEdge.substringBefore(":").trim()
             return if (edgeHost.isNotEmpty()) edgeHost else serverHost
         }
 
     val endpointPort: Int
         get() {
+            if (cdnEdgeValidationError != null) {
+                val parsedPort = runCatching { Uri.parse(normalizedServerUrl).port }.getOrNull()
+                if (parsedPort != null && parsedPort > 0) {
+                    return parsedPort
+                }
+
+                return if (normalizedServerUrl.startsWith("https")) 443 else 80
+            }
+
             val edgePort = normalizedCdnEdge.substringAfter(":", "").trim().toIntOrNull()
             if (edgePort != null) {
                 return edgePort

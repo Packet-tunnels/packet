@@ -512,8 +512,25 @@ async fn handle_socks5(
 
     // ── Step 2: SOCKS5 CONNECT request ──
     let n = socket.read(&mut buf).await?;
-    if n < 4 || buf[0] != 0x05 || buf[1] != 0x01 {
-        return Err("not a CONNECT request".into());
+    if n < 4 || buf[0] != 0x05 {
+        return Err("invalid SOCKS5 request".into());
+    }
+
+    if buf[1] != 0x01 {
+        let command = match buf[1] {
+            0x02 => "BIND",
+            0x03 => "UDP ASSOCIATE",
+            0x05 => "UDP FORWARD",
+            _ => "UNKNOWN",
+        };
+        info!(
+            "Stream {} unsupported SOCKS5 command 0x{:02x} ({})",
+            stream_id, buf[1], command
+        );
+        socket
+            .write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await?;
+        return Ok(());
     }
 
     let addr = match buf[3] {
