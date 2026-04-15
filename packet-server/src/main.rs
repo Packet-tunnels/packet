@@ -22,6 +22,7 @@ use axum::{
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -76,6 +77,7 @@ struct Session {
     writers: Mutex<HashMap<u32, OwnedWriteHalf>>,
     downstream_tx: mpsc::Sender<Frame>,
     downstream_rx: Mutex<mpsc::Receiver<Frame>>,
+    last_seen_unix: AtomicU64,
 }
 
 impl Session {
@@ -85,8 +87,26 @@ impl Session {
             writers: Mutex::new(HashMap::new()),
             downstream_tx: tx,
             downstream_rx: Mutex::new(rx),
+            last_seen_unix: AtomicU64::new(unix_now_secs()),
         }
     }
+
+    fn touch(&self) {
+        self.last_seen_unix.store(unix_now_secs(), Ordering::Relaxed);
+    }
+
+    fn is_recently_active(&self, now: u64, max_idle_secs: u64) -> bool {
+        now.saturating_sub(self.last_seen_unix.load(Ordering::Relaxed)) < max_idle_secs
+    }
+}
+
+const SESSION_IDLE_TTL_SECS: u64 = 15 * 60;
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ─── Relay Node ────────────────────────────────────────────────
@@ -159,7 +179,12 @@ async fn main() {
         loop {
             tokio::time::sleep(Duration::from_secs(300)).await;
             let mut sessions = cleanup_state.sessions.lock().await;
-            sessions.retain(|_token, session| Arc::strong_count(session) > 1);
+            let now = unix_now_secs();
+            // WebSocket sessions keep extra Arc references while open. HTTP polling
+            // sessions do not, so retain recently active sessions by idle TTL too.
+            sessions.retain(|_token, session| {
+                Arc::strong_count(session) > 1 || session.is_recently_active(now, SESSION_IDLE_TTL_SECS)
+            });
             // Clean dead relay nodes
             let mut relays = cleanup_state.relay_nodes.lock().await;
             relays.retain(|r| r.is_alive());
@@ -468,12 +493,13 @@ async fn relay_dispatch_to_client(
     relay: &Arc<RelayNode>,
     _state: &Arc<AppState>,
 ) {
+    let stream_id = frame.stream_id;
     let pending = relay.pending_connects.lock().await;
-    if let Some(session_tx) = pending.get(&frame.stream_id) {
+    if let Some(session_tx) = pending.get(&stream_id) {
         if session_tx.send(frame).await.is_err() {
             // Session is dead, clean up
             drop(pending);
-            relay.pending_connects.lock().await.remove(&frame.stream_id);
+            relay.pending_connects.lock().await.remove(&stream_id);
             relay.active_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -830,6 +856,7 @@ async fn handle_sync(
             );
         }
     };
+    session.touch();
 
     // Decrypt and decode upstream frames
     let encrypted = match b64_decode(&req.d) {

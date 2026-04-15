@@ -37,6 +37,7 @@ object TunnelPreferences {
     private const val KEY_TRANSPORT_MODE = "transport_mode"
     private const val KEY_STATE = "state"
     private const val KEY_MESSAGE = "message"
+    private const val KEY_STATE_UPDATED_AT = "state_updated_at"
     private const val KEY_RUNTIME_JSON = "runtime_json"
     private const val KEY_DIAGNOSTICS_JSON = "diagnostics_json"
 
@@ -77,14 +78,17 @@ object TunnelPreferences {
         val rawState = prefs.getString(KEY_STATE, TunnelState.IDLE.name) ?: TunnelState.IDLE.name
         val state = runCatching { TunnelState.valueOf(rawState) }.getOrDefault(TunnelState.IDLE)
         val message = prefs.getString(KEY_MESSAGE, "Ready") ?: "Ready"
-        return TunnelSnapshot(state = state, message = message)
+        val updatedAtMs = prefs.getLong(KEY_STATE_UPDATED_AT, 0L)
+        return TunnelSnapshot(state = state, message = message, updatedAtMs = updatedAtMs)
     }
 
     fun updateState(context: Context, state: TunnelState, message: String) {
+        val updatedAtMs = System.currentTimeMillis()
         prefs(context)
             .edit()
             .putString(KEY_STATE, state.name)
             .putString(KEY_MESSAGE, message)
+            .putLong(KEY_STATE_UPDATED_AT, updatedAtMs)
             .commit()
         TunnelEvents.broadcastState(context, state.name, message)
     }

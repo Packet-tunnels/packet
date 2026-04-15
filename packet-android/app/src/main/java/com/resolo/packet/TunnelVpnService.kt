@@ -27,6 +27,7 @@ import java.util.TimeZone
 class TunnelVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var processExitScheduled = false
+    private var connectInFlight = false
     private var activeConfiguration: TunnelConfiguration? = null
     private var lastRuntimeErrorLogged: String? = null
 
@@ -70,6 +71,11 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun connectTunnel() {
+        if (connectInFlight) {
+            TunnelLogStore.append(this, "[VPN] Connect request ignored because startup is already in progress")
+            return
+        }
+
         if (vpnInterface != null) {
             TunnelPreferences.updateState(this, TunnelState.RUNNING, "Tunnel already connected")
             updateNotification("Running")
@@ -88,11 +94,19 @@ class TunnelVpnService : VpnService() {
             return
         }
 
+        connectInFlight = true
         startTunnelForeground("Connecting")
         TunnelPreferences.updateState(this, TunnelState.CONNECTING, "Starting Android VPN service")
         TunnelLogStore.append(this, "[VPN] Loading Android VPN service configuration")
         TunnelLogStore.append(this, "[VPN] Starting Android VPN service shell")
-        logStartupEvidence(configuration)
+        runCatching {
+            logStartupEvidence(configuration)
+        }.onFailure { error ->
+            TunnelLogStore.append(
+                this,
+                "[DIAG] Startup evidence collection failed: ${error.localizedMessage ?: error.javaClass.simpleName}",
+            )
+        }
 
         Thread {
             try {
@@ -238,11 +252,13 @@ class TunnelVpnService : VpnService() {
             TunnelState.RUNNING,
             "Tunnel active — device traffic is routed through Android VPN and local SOCKS5 on port $listenPort",
         )
+        connectInFlight = false
         updateNotification("Running")
         refreshRuntimeTelemetry()
     }
 
     private fun disconnectTunnel(message: String) {
+        connectInFlight = false
         TunnelPreferences.updateState(this, TunnelState.DISCONNECTING, "Stopping Android VPN service")
         TunnelLogStore.append(this, "[VPN] Stop requested")
         stopTelemetryRefresh()
@@ -282,6 +298,7 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun failStart(message: String) {
+        connectInFlight = false
         val configuration = activeConfiguration ?: TunnelPreferences.loadConfiguration(this)
         TunnelLogStore.append(this, "[VPN] $message")
         stopTelemetryRefresh()
@@ -730,24 +747,28 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun activeNetworkSummary(): String {
-        val connectivity = getSystemService(ConnectivityManager::class.java)
-            ?: return "ConnectivityManager unavailable"
-        val network = connectivity.activeNetwork ?: return "No active network"
-        val caps = connectivity.getNetworkCapabilities(network)
-            ?: return "No network capabilities"
+        return runCatching {
+            val connectivity = getSystemService(ConnectivityManager::class.java)
+                ?: return "ConnectivityManager unavailable"
+            val network = connectivity.activeNetwork ?: return "No active network"
+            val caps = connectivity.getNetworkCapabilities(network)
+                ?: return "No network capabilities"
 
-        val transports = buildList {
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("WIFI")
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("CELLULAR")
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("ETHERNET")
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
-            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) add("BLUETOOTH")
-        }.ifEmpty { listOf("UNKNOWN") }
+            val transports = buildList {
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("WIFI")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("CELLULAR")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("ETHERNET")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH)) add("BLUETOOTH")
+            }.ifEmpty { listOf("UNKNOWN") }
 
-        return "transports=${transports.joinToString("+")} validated=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)} " +
-            "internet=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)} " +
-            "not_metered=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)} " +
-            "captive_portal=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)}"
+            "transports=${transports.joinToString("+")} validated=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)} " +
+                "internet=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)} " +
+                "not_metered=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)} " +
+                "captive_portal=${caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL)}"
+        }.getOrElse { error ->
+            "Unavailable: ${error.localizedMessage ?: error.javaClass.simpleName}"
+        }
     }
 
     private fun privateDnsSummary(): String {

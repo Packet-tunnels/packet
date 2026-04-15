@@ -1,39 +1,50 @@
 package com.resolo.packet
 
+import com.resolo.phantom.PhantomTunnel
+
 class PacketBridge {
     interface LogCallback {
         fun onLog(message: String)
     }
 
     companion object {
-        init {
-            System.loadLibrary("phantom_client")
+        @JvmStatic
+        fun setLogCallback(callback: LogCallback) {
+            PhantomTunnel.setLogCallback(callback)
         }
 
         @JvmStatic
-        external fun setLogCallback(callback: LogCallback)
+        fun emitTestOutput() {
+            PhantomTunnel.emitTestOutput()
+        }
 
         @JvmStatic
-        external fun emitTestOutput()
+        fun copyStatsJson(): String? = PhantomTunnel.copyStatsJson()
 
         @JvmStatic
-        external fun copyStatsJson(): String?
+        fun startClient(serverUrl: String, secret: String, listenPort: Int): Int =
+            PhantomTunnel.startClient(serverUrl, secret, listenPort)
 
         @JvmStatic
-        external fun startClient(serverUrl: String, secret: String, listenPort: Int): Int
-
-        @JvmStatic
-        external fun startClientCdn(
+        fun startClientCdn(
             serverUrl: String,
             secret: String,
             listenPort: Int,
             cdnEdge: String,
             hostOverride: String,
             transportMode: Int
-        ): Int
+        ): Int =
+            PhantomTunnel.startClientCdn(
+                serverUrl,
+                secret,
+                listenPort,
+                cdnEdge,
+                hostOverride,
+                transportMode,
+            )
 
         @JvmStatic
-        external fun startClientFull(
+        fun startClientFull(
             serverUrl: String,
             secret: String,
             listenPort: Int,
@@ -41,18 +52,30 @@ class PacketBridge {
             hostOverride: String,
             sniOverride: String,
             transportMode: Int
-        ): Int
+        ): Int =
+            PhantomTunnel.startClientFull(
+                serverUrl,
+                secret,
+                listenPort,
+                cdnEdge,
+                hostOverride,
+                sniOverride,
+                transportMode,
+            )
 
         @JvmStatic
-        external fun startTun2Socks(
+        fun startTun2Socks(
             tunFd: Int,
             socksAddress: String,
             socksPort: Int,
             mtu: Int,
             dnsAddress: String
-        ): Int
+        ): Int =
+            PhantomTunnel.startTun2Socks(tunFd, socksAddress, socksPort, mtu, dnsAddress)
 
         @JvmStatic
-        external fun stopTun2Socks()
+        fun stopTun2Socks() {
+            PhantomTunnel.stopTun2Socks()
+        }
     }
 }

@@ -305,6 +305,10 @@ final class TunnelManager: ObservableObject {
             throw TunnelManagerError.invalidConfiguration("Shared secret is required.")
         }
 
+        if let cdnEdgeValidationError = configuration.cdnEdgeValidationError {
+            throw TunnelManagerError.invalidConfiguration(cdnEdgeValidationError)
+        }
+
         let trimmedPort = configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedPort.isEmpty,
             trimmedPort.lowercased() != "auto",

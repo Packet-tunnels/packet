@@ -16,6 +16,8 @@ import android.graphics.drawable.GradientDrawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.text.Layout
 import android.text.format.Formatter
@@ -85,6 +87,16 @@ class MainActivity : Activity() {
     private var receiverRegistered = false
     private var rateAnchor: RuntimeRateAnchor? = null
     private var logsCollapsed = true
+    private val uiHandler = Handler(Looper.getMainLooper())
+
+    private val stalledConnectRunnable = Runnable {
+        val stateRecovered = reconcileStalledTunnelState()
+        renderState()
+        renderDashboard()
+        if (stateRecovered) {
+            renderLogs()
+        }
+    }
 
     private val logCallback = object : PacketBridge.LogCallback {
         override fun onLog(message: String) {
@@ -215,6 +227,7 @@ class MainActivity : Activity() {
         super.onStart()
         registerTunnelReceiver()
         currentConfiguration = TunnelPreferences.loadConfiguration(this)
+        reconcileStalledTunnelState()
         reconcileVpnPermissionState()
         renderConfigurationSummary()
         renderState()
@@ -224,12 +237,14 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        reconcileStalledTunnelState()
         reconcileVpnPermissionState()
         renderState()
         renderDashboard()
     }
 
     override fun onStop() {
+        uiHandler.removeCallbacks(stalledConnectRunnable)
         if (receiverRegistered) {
             unregisterReceiver(tunnelEventReceiver)
             receiverRegistered = false
@@ -245,9 +260,14 @@ class MainActivity : Activity() {
             return
         }
 
-        if (resultCode == RESULT_OK && pendingStartAfterPermission) {
-            TunnelLogStore.append(this, "[APP] Android VPN permission approved")
-            startTunnelService(TunnelActions.ACTION_CONNECT)
+        if (resultCode == RESULT_OK) {
+            if (pendingStartAfterPermission ||
+                TunnelPreferences.loadSnapshot(this).state == TunnelState.REQUESTING_PERMISSION
+            ) {
+                pendingStartAfterPermission = false
+                TunnelLogStore.append(this, "[APP] Android VPN permission approved")
+                startTunnelService(TunnelActions.ACTION_CONNECT)
+            }
         } else {
             TunnelPreferences.updateState(this, TunnelState.IDLE, "VPN permission was cancelled")
             TunnelLogStore.append(this, "[APP] Android VPN permission was cancelled")
@@ -318,8 +338,10 @@ class MainActivity : Activity() {
 
     private fun startTunnelService(action: String) {
         when (action) {
-            TunnelActions.ACTION_CONNECT ->
+            TunnelActions.ACTION_CONNECT -> {
+                TunnelPreferences.updateState(this, TunnelState.CONNECTING, "Starting Android VPN service")
                 TunnelLogStore.append(this, "[APP] Start requested through Android VpnService")
+            }
             TunnelActions.ACTION_DISCONNECT ->
                 TunnelLogStore.append(this, "[APP] Stop requested through Android VpnService")
         }
@@ -352,6 +374,7 @@ class MainActivity : Activity() {
     }
 
     private fun renderState() {
+        reconcileStalledTunnelState()
         val snapshot = TunnelPreferences.loadSnapshot(this)
         renderStatusPanel(
             snapshot = snapshot,
@@ -377,6 +400,7 @@ class MainActivity : Activity() {
             else -> "#2563EB"
         }
         startButton.backgroundTintList = ColorStateList.valueOf(Color.parseColor(colorHex))
+        scheduleStateWatchdog(snapshot)
     }
 
     private fun reconcileVpnPermissionState() {
@@ -409,6 +433,43 @@ class MainActivity : Activity() {
                 "[APP] Android VPN approval is still required; tap Connect to open the system dialog again",
             )
         }
+    }
+
+    private fun reconcileStalledTunnelState(): Boolean {
+        val snapshot = TunnelPreferences.loadSnapshot(this)
+        if (snapshot.state != TunnelState.CONNECTING) {
+            return false
+        }
+
+        val stateAgeMs = System.currentTimeMillis() - snapshot.updatedAtMs
+        if (stateAgeMs < CONNECT_TIMEOUT_MS) {
+            return false
+        }
+
+        val timeoutMessage = "Tunnel start timed out. Try again."
+        TunnelPreferences.updateRuntimeSnapshot(
+            this,
+            TunnelPreferences.loadRuntimeSnapshot(this).copy(
+                state = "failed",
+                connectedSince = null,
+                tunnelActive = false,
+                lastError = timeoutMessage,
+            ),
+        )
+        TunnelPreferences.updateState(this, TunnelState.FAILED, timeoutMessage)
+        TunnelLogStore.append(this, "[APP] $timeoutMessage")
+        return true
+    }
+
+    private fun scheduleStateWatchdog(snapshot: TunnelSnapshot) {
+        uiHandler.removeCallbacks(stalledConnectRunnable)
+        if (snapshot.state != TunnelState.CONNECTING || snapshot.updatedAtMs <= 0L) {
+            return
+        }
+
+        val remainingMs = (CONNECT_TIMEOUT_MS - (System.currentTimeMillis() - snapshot.updatedAtMs))
+            .coerceAtLeast(250L)
+        uiHandler.postDelayed(stalledConnectRunnable, remainingMs)
     }
 
     private fun renderConfigurationSummary() {
@@ -837,5 +898,6 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_VPN_PERMISSION = 1001
+        const val CONNECT_TIMEOUT_MS = 20_000L
     }
 }

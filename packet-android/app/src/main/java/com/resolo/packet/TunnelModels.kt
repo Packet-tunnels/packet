@@ -163,6 +163,7 @@ data class TunnelConfiguration(
 data class TunnelSnapshot(
     val state: TunnelState = TunnelState.IDLE,
     val message: String = "Ready",
+    val updatedAtMs: Long = 0,
 )
 
 data class TunnelRuntimeSnapshot(

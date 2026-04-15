@@ -39,9 +39,9 @@ enum TunnelTransportMode: Int32, CaseIterable, Identifiable {
 }
 
 struct TunnelConfiguration: Equatable {
-    var serverURL = "http://piano-lessons.site"
-    var secret = "change-me"
-    var listenPort = "1080"
+    var serverURL = ""
+    var secret = ""
+    var listenPort = ""
     var cdnEdge = ""
     var hostOverride = ""
     var transportMode: TunnelTransportMode = .auto
@@ -54,7 +54,9 @@ struct TunnelConfiguration: Equatable {
         cdnEdge = providerConfiguration[TunnelProviderKeys.cdnEdge] as? String ?? cdnEdge
         hostOverride = providerConfiguration[TunnelProviderKeys.hostOverride] as? String ?? hostOverride
 
-        if let port = providerConfiguration[TunnelProviderKeys.listenPort] as? NSNumber {
+        if let port = providerConfiguration[TunnelProviderKeys.listenPort] as? NSNumber,
+            port.intValue > 0
+        {
             listenPort = port.stringValue
         } else if let port = providerConfiguration[TunnelProviderKeys.listenPort] as? String {
             listenPort = port
@@ -83,6 +85,31 @@ struct TunnelConfiguration: Equatable {
         Self.trimmed(hostOverride)
     }
 
+    var cdnEdgeValidationError: String? {
+        let edge = normalizedCDNEdge
+        if edge.isEmpty {
+            return nil
+        }
+
+        if edge.allSatisfy(\.isNumber) {
+            return "CDN edge must be a host or IP, optionally with :port. If you only need a custom origin port, add it to Server URL instead."
+        }
+
+        if edge.hasPrefix(":") || edge.hasSuffix(":") {
+            return "CDN edge must look like 185.143.234.235:80 or edge.example.ir."
+        }
+
+        let parts = edge.split(separator: ":", omittingEmptySubsequences: false)
+        if parts.count == 2 {
+            let port = String(parts[1])
+            guard let portValue = Int(port), (1...65535).contains(portValue) else {
+                return "CDN edge port must be between 1 and 65535."
+            }
+        }
+
+        return nil
+    }
+
     var usesCDN: Bool {
         !normalizedCDNEdge.isEmpty || !normalizedHostOverride.isEmpty
     }
@@ -109,6 +136,43 @@ struct TunnelConfiguration: Equatable {
             .map(String.init) ?? "127.0.0.1"
     }
 
+    var ingressLabel: String {
+        if !normalizedCDNEdge.isEmpty || !normalizedHostOverride.isEmpty {
+            return "CDN relay"
+        }
+
+        return "Standard endpoint"
+    }
+
+    var endpointHost: String {
+        if cdnEdgeValidationError != nil {
+            return remoteAddress
+        }
+
+        let edgeHost = normalizedCDNEdge
+            .split(separator: ":")
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        return edgeHost.isEmpty ? remoteAddress : edgeHost
+    }
+
+    var endpointPort: Int {
+        if cdnEdgeValidationError == nil {
+            let edgeParts = normalizedCDNEdge.split(separator: ":")
+            if edgeParts.count == 2, let port = Int(edgeParts[1]), (1...65535).contains(port) {
+                return port
+            }
+        }
+
+        if let port = URL(string: normalizedServerURL)?.port, port > 0 {
+            return port
+        }
+
+        return normalizedServerURL.lowercased().hasPrefix("https://") ? 443 : 80
+    }
+
     var proxyExceptionHosts: [String] {
         var hosts = ["127.0.0.1", "localhost", remoteAddress]
 
@@ -127,14 +191,19 @@ struct TunnelConfiguration: Equatable {
     }
 
     var providerConfiguration: [String: Any] {
-        [
+        var configuration: [String: Any] = [
             TunnelProviderKeys.serverURL: normalizedServerURL,
             TunnelProviderKeys.secret: normalizedSecret,
-            TunnelProviderKeys.listenPort: Int(listenPortValue ?? 0),
             TunnelProviderKeys.cdnEdge: normalizedCDNEdge,
             TunnelProviderKeys.hostOverride: normalizedHostOverride,
             TunnelProviderKeys.transportMode: Int(transportMode.rawValue)
         ]
+
+        if let listenPortValue {
+            configuration[TunnelProviderKeys.listenPort] = Int(listenPortValue)
+        }
+
+        return configuration
     }
 
     private static func trimmed(_ value: String) -> String {
@@ -224,7 +293,7 @@ enum TunnelRuntimeBridge {
 
         return configuration.normalizedServerURL.withCString { serverURLPointer in
             configuration.normalizedSecret.withCString { secretPointer in
-                if configuration.usesCDN {
+                if configuration.usesCDN || configuration.transportMode != .auto {
                     return withOptionalCString(configuration.normalizedCDNEdge) { cdnEdgePointer in
                         withOptionalCString(configuration.normalizedHostOverride) { hostOverridePointer in
                             phantom_start_cdn(

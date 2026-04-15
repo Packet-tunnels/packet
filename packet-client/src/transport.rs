@@ -550,7 +550,23 @@ async fn run_http_loop(
                 set_runtime_ping(ping_ms);
                 set_runtime_connected(None);
                 let status = resp.status();
-                match resp.json::<SyncResponse>().await {
+                let content_type = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let body = match resp.text().await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        let message = format!("Sync response read error: {} (HTTP {})", e, status);
+                        set_runtime_last_error(message.clone());
+                        error!("[PHANTOM] {}", message);
+                        continue;
+                    }
+                };
+
+                match serde_json::from_str::<SyncResponse>(&body) {
                     Ok(sync_resp) => match b64_decode(&sync_resp.d) {
                         Ok(encrypted) => match decrypt(&key, &encrypted) {
                             Ok(plaintext) => match decode_frames(&plaintext) {
@@ -569,15 +585,34 @@ async fn run_http_loop(
                         },
                         Err(e) => error!("[PHANTOM] Base64 decode error: {}", e),
                     },
-                    Err(e) => {
-                        set_runtime_last_error(format!(
-                            "Sync response parse error: {} (HTTP {})",
-                            e, status
-                        ));
-                        error!(
-                            "[PHANTOM] Sync response parse error: {} (HTTP {})",
-                            e, status
-                        );
+                    Err(parse_error) => {
+                        let server_error = serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|json| {
+                                json.get("error")
+                                    .and_then(|value| value.as_str())
+                                    .map(str::to_owned)
+                            });
+
+                        let message = if let Some(server_error) = server_error {
+                            format!(
+                                "Sync rejected by server: {} (HTTP {})",
+                                server_error, status
+                            )
+                        } else {
+                            let body_preview = body
+                                .chars()
+                                .take(180)
+                                .collect::<String>()
+                                .replace('\n', " ");
+                            format!(
+                                "Sync response parse error: {} (HTTP {}, content-type={}, body='{}')",
+                                parse_error, status, content_type, body_preview
+                            )
+                        };
+
+                        set_runtime_last_error(message.clone());
+                        error!("[PHANTOM] {}", message);
                     }
                 }
             }
