@@ -1,4 +1,4 @@
-# Phantom Tunnel
+# Packet
 
 A custom, protocol-level internet tunnel built in Rust. Designed from scratch — not based on VLESS, Shadowsocks, or any existing proxy protocol.
 
@@ -6,7 +6,7 @@ A custom, protocol-level internet tunnel built in Rust. Designed from scratch �
 
 ## How It Works
 
-Unlike VPNs and standard proxies that use recognizable protocols (which get fingerprinted and blocked), Phantom Tunnel hides data inside **normal web traffic**:
+Unlike VPNs and standard proxies that use recognizable protocols (which get fingerprinted and blocked), Packet hides data inside **normal web traffic**:
 
 ### Direct Mode
 ```
@@ -23,12 +23,12 @@ To DPI/censors, CDN bypass traffic looks like a normal web application connectin
 ## Architecture
 
 ```
-phantom-tunnel/
-├── phantom-proto/     # Shared: encryption (XChaCha20-Poly1305), framing, auth, padding
-├── phantom-server/    # VPS: HTTP server + WebSocket tunnel + real website
-├── phantom-client/    # Local: SOCKS5 proxy + WebSocket/HTTP tunnel client
-├── phantom-bridge/    # Domestic relay: transparent TCP forwarder for censored networks
-├── phantom-relay/     # Exit relay: outbound Starlink / unfiltered internet hop
+packet/
+├── packet-proto/     # Shared: encryption (XChaCha20-Poly1305), framing, auth, padding
+├── packet-server/    # VPS: HTTP server + WebSocket tunnel + real website
+├── packet-client/    # Local: SOCKS5 proxy + WebSocket/HTTP tunnel client
+├── packet-bridge/    # Domestic relay: transparent TCP forwarder for censored networks
+├── packet-relay/     # Exit relay: outbound Starlink / unfiltered internet hop
 └── static/            # Camouflage website content (piano lessons)
 ```
 

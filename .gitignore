@@ -3,8 +3,11 @@ Cargo.lock
 *.swp
 *.swo
 .env
-phantom-ios/*.xcodeproj
-phantom-ios/.build
-phantom-android/.gradle
-phantom-android/build
-phantom-android/app/build
+.DS_Store
+packet-ios/*.xcodeproj
+packet-ios/*.xcodeproj/xcuserdata
+packet-ios/*.xcodeproj/project.xcworkspace/xcuserdata
+packet-ios/.build
+packet-android/.gradle
+packet-android/build
+packet-android/app/build

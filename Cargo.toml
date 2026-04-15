@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "phantom-proto",
-    "phantom-server",
-    "phantom-client",
-    "phantom-bridge",
-    "phantom-relay",
+    "packet-proto",
+    "packet-server",
+    "packet-client",
+    "packet-bridge",
+    "packet-relay",
 ]
 resolver = "2"
 
