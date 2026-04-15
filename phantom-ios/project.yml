@@ -1,6 +1,21 @@
 name: PhantomTunnel
 options:
   bundleIdPrefix: com.resolo.phantom
+schemes:
+  PhantomTunnel:
+    build:
+      targets:
+        PhantomTunnel: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
 targets:
   PhantomTunnel:
     type: application
@@ -17,6 +32,7 @@ targets:
       CODE_SIGN_IDENTITY: "Apple Development"
       CODE_SIGN_ENTITLEMENTS: PhantomTunnel/PhantomTunnel.entitlements
       GENERATE_INFOPLIST_FILE: YES
+      INFOPLIST_KEY_UILaunchScreen_Generation: YES
       PRODUCT_BUNDLE_IDENTIFIER: com.resolo.phantom.PhantomTunnel
       SWIFT_VERSION: 5.0
       SWIFT_OBJC_BRIDGING_HEADER: PhantomTunnel/PhantomTunnel-Bridging-Header.h
@@ -44,7 +60,7 @@ targets:
       CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
       GENERATE_INFOPLIST_FILE: NO
       INFOPLIST_FILE: PacketTunnel/Info.plist
-      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.phantom.PacketTunnel
+      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.phantom.PhantomTunnel.PacketTunnel
       PRODUCT_NAME: PacketTunnel
       SKIP_INSTALL: YES
       SWIFT_VERSION: 5.0

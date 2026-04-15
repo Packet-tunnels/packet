@@ -86,6 +86,12 @@ struct ContentView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
 
+            if let listenPort = tunnelManager.telemetry.snapshot.listenPort {
+                Text("Local SOCKS5: 127.0.0.1:\(listenPort)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+
             if tunnelManager.telemetry.isWaitingForTraffic {
                 Text("Tunnel session is established. Waiting for iOS app traffic to reach the local SOCKS proxy.")
                     .font(.system(size: 12))
@@ -137,7 +143,12 @@ struct ContentView: View {
             }
 
             HStack(spacing: 24) {
-                configField(title: "Listen Port", text: $tunnelManager.configuration.listenPort, keyboard: .numberPad)
+                configField(
+                    title: "Listen Port",
+                    text: $tunnelManager.configuration.listenPort,
+                    placeholder: "Auto",
+                    keyboard: .numberPad
+                )
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Transport")
@@ -184,6 +195,7 @@ struct ContentView: View {
     private func configField(
         title: String,
         text: Binding<String>,
+        placeholder: String = "",
         keyboard: UIKeyboardType = .default
     ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -192,7 +204,7 @@ struct ContentView: View {
                 .tracking(1.5)
                 .foregroundStyle(.secondary)
                 .textCase(.uppercase)
-            TextField("", text: text)
+            TextField(placeholder, text: text)
                 .font(.system(size: 14, design: .monospaced))
                 .foregroundStyle(.primary)
                 .keyboardType(keyboard)

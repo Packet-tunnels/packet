@@ -86,7 +86,12 @@ struct TunnelConfiguration: Equatable {
     }
 
     var listenPortValue: UInt16? {
-        UInt16(Self.trimmed(listenPort))
+        let trimmed = Self.trimmed(listenPort)
+        if trimmed.isEmpty || trimmed.lowercased() == "auto" {
+            return nil
+        }
+
+        return UInt16(trimmed)
     }
 
     var remoteAddress: String {
@@ -140,6 +145,7 @@ struct TunnelRuntimeSnapshot: Decodable, Equatable {
     var transport = "Auto"
     var serverHost = ""
     var cdnEdge: String?
+    var listenPort: UInt16?
     var bytesUp: UInt64 = 0
     var bytesDown: UInt64 = 0
     var activeStreams: UInt32 = 0
@@ -212,10 +218,7 @@ enum TunnelRuntimeBridge {
 
     static func startRustClient(with configuration: TunnelConfiguration) -> Int32 {
         installLogCallback()
-
-        guard let listenPort = configuration.listenPortValue else {
-            return -1
-        }
+        let listenPort = configuration.listenPortValue ?? 0
 
         return configuration.normalizedServerURL.withCString { serverURLPointer in
             configuration.normalizedSecret.withCString { secretPointer in

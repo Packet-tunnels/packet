@@ -36,6 +36,12 @@ struct Cli {
     #[arg(long)]
     host: Option<String>,
 
+    /// Override the TLS SNI sent during the HTTPS/WSS handshake.
+    /// Useful when the TCP destination, HTTP Host header, and visible SNI
+    /// must be different.
+    #[arg(long)]
+    sni: Option<String>,
+
     /// Enable TLS ClientHello fragmentation.
     /// Splits the TLS handshake across multiple TCP segments to prevent
     /// DPI from reading the SNI field. Only useful for HTTPS connections.
@@ -77,6 +83,7 @@ async fn main() {
         fragment: cli.fragment,
         fragment_size: cli.fragment_size,
         padding: !cli.no_padding,
+        sni_override: cli.sni,
     };
 
     phantom_client::start_client_with_config(config).await;

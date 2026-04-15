@@ -32,10 +32,8 @@ struct TunnelTelemetry: Equatable {
     }
 
     var isWaitingForTraffic: Bool {
-        snapshot.tunnelActive &&
-        snapshot.bytesUp == 0 &&
-        snapshot.bytesDown == 0 &&
-        snapshot.activeStreams == 0
+        snapshot.tunnelActive && snapshot.bytesUp == 0 && snapshot.bytesDown == 0
+            && snapshot.activeStreams == 0
     }
 }
 
@@ -123,8 +121,9 @@ final class TunnelManager: ObservableObject {
                 let connectionStatus = manager.connection.status
 
                 guard connectionStatus != .connected,
-                      connectionStatus != .connecting,
-                      connectionStatus != .reasserting else {
+                    connectionStatus != .connecting,
+                    connectionStatus != .reasserting
+                else {
                     apply(connectionStatus)
                     lastResult = "Tunnel is already active"
                     return
@@ -169,7 +168,8 @@ final class TunnelManager: ObservableObject {
             apply(manager.connection.status)
             await refreshRuntimeStats()
         } catch {
-            logManager.appendLog("[APP] Failed to load saved tunnel preferences: \(error.localizedDescription)")
+            logManager.appendLog(
+                "[APP] Failed to load saved tunnel preferences: \(error.localizedDescription)")
         }
     }
 
@@ -248,8 +248,8 @@ final class TunnelManager: ObservableObject {
         var downloadRate = 0.0
 
         if let rateAnchor,
-           snapshot.bytesUp >= rateAnchor.bytesUp,
-           snapshot.bytesDown >= rateAnchor.bytesDown
+            snapshot.bytesUp >= rateAnchor.bytesUp,
+            snapshot.bytesDown >= rateAnchor.bytesDown
         {
             let elapsed = max(now.timeIntervalSince(rateAnchor.date), 0.5)
             uploadRate = Double(snapshot.bytesUp - rateAnchor.bytesUp) / elapsed
@@ -299,8 +299,13 @@ final class TunnelManager: ObservableObject {
             throw TunnelManagerError.invalidConfiguration("Shared secret is required.")
         }
 
-        guard let port = configuration.listenPortValue, port > 0 else {
-            throw TunnelManagerError.invalidConfiguration("Listen port must be between 1 and 65535.")
+        let trimmedPort = configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPort.isEmpty,
+            trimmedPort.lowercased() != "auto",
+            configuration.listenPortValue == nil
+        {
+            throw TunnelManagerError.invalidConfiguration(
+                "Listen port must be 1024-65535, or leave it blank for auto.")
         }
     }
 
@@ -309,7 +314,8 @@ final class TunnelManager: ObservableObject {
 
         return managers.first(where: { existingManager in
             let tunnelProtocol = existingManager.protocolConfiguration as? NETunnelProviderProtocol
-            return tunnelProtocol?.providerBundleIdentifier == TunnelConstants.providerBundleIdentifier
+            return tunnelProtocol?.providerBundleIdentifier
+                == TunnelConstants.providerBundleIdentifier
         }) ?? NETunnelProviderManager()
     }
 
@@ -431,7 +437,7 @@ private enum TunnelManagerError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case let .invalidConfiguration(message):
+        case .invalidConfiguration(let message):
             return message
         }
     }

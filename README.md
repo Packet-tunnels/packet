@@ -28,6 +28,7 @@ phantom-tunnel/
 ├── phantom-server/    # VPS: HTTP server + WebSocket tunnel + real website
 ├── phantom-client/    # Local: SOCKS5 proxy + WebSocket/HTTP tunnel client
 ├── phantom-bridge/    # Domestic relay: transparent TCP forwarder for censored networks
+├── phantom-relay/     # Exit relay: outbound Starlink / unfiltered internet hop
 └── static/            # Camouflage website content (piano lessons)
 ```
 
@@ -69,6 +70,20 @@ cargo build --release -p phantom-bridge
   --transport ws \
   --cdn-edge "185.143.234.235:80" \
   --host "piano-lessons.site"
+```
+
+### Client (TLS Fronting with custom SNI)
+```bash
+# Use this when the reachable ingress, the Host header, and the visible SNI
+# need to be different.
+./phantom-client \
+  --server https://piano-lessons.site \
+  --secret "your-shared-secret" \
+  --listen 127.0.0.1:1080 \
+  --transport ws \
+  --cdn-edge "104.16.132.229:443" \
+  --host "piano-lessons.site" \
+  --sni "allowed-site.ir"
 ```
 
 ### Bridge (on domestic VPS)
@@ -114,6 +129,21 @@ chmod +x phantom-client-android
 3. **Enable WebSocket**: In ArvanCloud dashboard, enable WebSocket forwarding
 4. **Note edge IPs**: ArvanCloud assigns domestic edge IPs to your domain
 5. **Configure client**: Use `--cdn-edge` with the ArvanCloud edge IP
+
+## Iran Connectivity Playbook
+
+1. Treat direct foreign-IP access as unavailable from Iran.
+2. Prefer a reachable ingress first:
+   - a domestic bridge VPS running `phantom-bridge`, or
+   - a CDN/fronted hostname once the provider is active.
+3. Keep `phantom-relay` as an exit node only. It does not replace the need for a reachable ingress.
+4. If Arvan still shows the domain as `pending`, do not block rollout on it. Use the domestic bridge first and switch to CDN later.
+
+Recommended path during heavy blockout:
+
+```text
+Android client in Iran -> domestic bridge or active CDN edge -> phantom-server -> phantom-relay (optional exit)
+```
 
 ## Deploy to VPS
 ```bash

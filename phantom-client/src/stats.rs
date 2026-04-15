@@ -28,11 +28,22 @@ lazy_static::lazy_static! {
     static ref CLIENT_STATS: Mutex<ClientStats> = Mutex::new(ClientStats::default());
 }
 
+fn first_server_candidate(value: &str) -> String {
+    value
+        .split(|ch: char| ch == ',' || ch == ';' || ch.is_whitespace())
+        .find_map(|candidate| {
+            let trimmed = candidate.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
+        .unwrap_or_else(|| value.trim().to_string())
+}
+
 pub fn reset(config: &ClientConfig) {
-    let server_host = url::Url::parse(&config.server_url)
+    let primary_server = first_server_candidate(&config.server_url);
+    let server_host = url::Url::parse(&primary_server)
         .ok()
         .and_then(|url| url.host_str().map(|host| host.to_string()))
-        .unwrap_or_else(|| config.server_url.clone());
+        .unwrap_or(primary_server);
 
     let mut stats = CLIENT_STATS.lock().unwrap();
     stats.snapshot = StatsSnapshot {

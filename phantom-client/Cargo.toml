@@ -23,3 +23,10 @@ clap = { version = "4", features = ["derive", "env"] }
 rand = "0.8"
 jni = "0.22.4"
 lazy_static = "1.5.0"
+socket2 = "0.6.3"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+webpki-roots = "0.26"
+rustls-pki-types = "1"
+libc = "0.2"
+tun2socks = "0.1.10"

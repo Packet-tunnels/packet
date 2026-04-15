@@ -1,9 +1,9 @@
 # PhantomTunnel Android
 
-This Android target is the same simple model as iOS:
+This Android target shares the same Rust tunnel core as iOS:
 
 - Rust provides the tunnel engine and JNI bridge.
-- Kotlin provides a small test app with configuration fields and live logs.
+- Kotlin provides the app UI, saved configuration, logs, and Android VPN service shell.
 
 ## One-time setup
 
@@ -42,5 +42,15 @@ phantom-android/app/build/outputs/apk/debug/app-debug.apk
 
 ## Current scope
 
-The Android app is a test harness for the Rust client and log output.
-It does not yet integrate with Android's full-device `VpnService`.
+The Android app now:
+
+- Saves the tunnel configuration locally.
+- Requests Android VPN permission and starts a dedicated `VpnService` process.
+- Runs the Rust SOCKS5 client inside that service process so disconnect can terminate it cleanly.
+- Bridges the Android TUN interface into the local SOCKS5 listener with `tun2socks`.
+- Routes device TCP traffic through the Android VPN once the tunnel is connected.
+- Streams logs back into the app UI.
+
+Current limitation:
+
+- UDP-heavy traffic can still degrade until SOCKS UDP relay support is complete end-to-end.

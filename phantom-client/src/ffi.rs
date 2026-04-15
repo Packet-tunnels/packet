@@ -1,4 +1,4 @@
-use crate::{start_client, start_client_with_config, stats, ClientConfig, TransportMode};
+use crate::{bind_socks_listener, start_client_with_listener, ClientConfig, TransportMode};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
@@ -107,6 +107,79 @@ fn init_logging() {
         .try_init();
 }
 
+fn bound_listen_addr(listener: &std::net::TcpListener) -> Result<String, String> {
+    let local_addr = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to read bound local address: {}", e))?;
+    Ok(format!("127.0.0.1:{}", local_addr.port()))
+}
+
+fn bind_requested_or_auto_listener(
+    requested_port: u16,
+) -> Result<(std::net::TcpListener, String, u16), String> {
+    let requested_addr = format!("127.0.0.1:{}", requested_port);
+
+    match bind_socks_listener(&requested_addr) {
+        Ok(listener) => {
+            let listen_addr = bound_listen_addr(&listener)?;
+            let actual_port = listener
+                .local_addr()
+                .map_err(|e| format!("Failed to read bound local address: {}", e))?
+                .port();
+
+            if requested_port == 0 {
+                tracing::info!("[PHANTOM] Auto-selected local SOCKS5 port {}", actual_port);
+            }
+
+            Ok((listener, listen_addr, actual_port))
+        }
+        Err(request_error) if requested_port != 0 => {
+            tracing::warn!(
+                "[PHANTOM] Requested local SOCKS5 port {} is busy, retrying with auto port",
+                requested_port
+            );
+
+            let listener = bind_socks_listener("127.0.0.1:0").map_err(|fallback_error| {
+                format!(
+                    "{}; fallback to automatic local port failed: {}",
+                    request_error, fallback_error
+                )
+            })?;
+
+            let actual_port = listener
+                .local_addr()
+                .map_err(|e| format!("Failed to read bound local address: {}", e))?
+                .port();
+            let listen_addr = format!("127.0.0.1:{}", actual_port);
+
+            tracing::info!(
+                "[PHANTOM] Falling back from requested local SOCKS5 port {} to {}",
+                requested_port,
+                actual_port
+            );
+
+            Ok((listener, listen_addr, actual_port))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn spawn_client_with_bound_listener(config: ClientConfig, listener: std::net::TcpListener) -> i32 {
+    let actual_port = listener
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or_default();
+
+    thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(async {
+            start_client_with_listener(config, listener).await;
+        });
+    });
+
+    i32::from(actual_port)
+}
+
 #[no_mangle]
 pub extern "C" fn phantom_emit_test_output() {
     init_logging();
@@ -114,26 +187,28 @@ pub extern "C" fn phantom_emit_test_output() {
     tracing::info!("[PHANTOM] Rust log callback delivered output to SwiftUI");
 }
 
+// ─── C API (iOS & General FFI) ─────────────────────────────────
+
+/// Returns a JSON string containing the current tunnel stats, or null if unavailable.
+/// The caller MUST free the returned string using `phantom_free_string`.
 #[no_mangle]
 pub extern "C" fn phantom_copy_stats_json() -> *mut c_char {
-    let json = stats::snapshot_json();
+    let json = crate::runtime_stats_json().unwrap_or_else(|| "{}".to_string());
     CString::new(json)
         .unwrap_or_else(|_| CString::new("{}").unwrap())
         .into_raw()
 }
 
+/// Frees a string previously allocated by `phantom_copy_stats_json`.
 #[no_mangle]
-pub extern "C" fn phantom_free_string(value: *mut c_char) {
-    if value.is_null() {
+pub extern "C" fn phantom_free_string(s: *mut c_char) {
+    if s.is_null() {
         return;
     }
-
     unsafe {
-        let _ = CString::from_raw(value);
+        let _ = CString::from_raw(s);
     }
 }
-
-// ─── C API (iOS & General FFI) ─────────────────────────────────
 
 /// Start Phantom Tunnel with basic configuration (backward compatible).
 #[no_mangle]
@@ -157,17 +232,23 @@ pub extern "C" fn phantom_start(
     };
 
     init_logging();
-    let listen_addr = format!("127.0.0.1:{}", listen_port);
-
-    // Spawn the async runtime in a new background thread
-    thread::spawn(move || {
-        let rt = Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(async {
-            start_client(url, sec, listen_addr).await;
-        });
-    });
-
-    0 // Success
+    let (listener, listen_addr, _) = match bind_requested_or_auto_listener(listen_port) {
+        Ok(bound) => bound,
+        Err(e) => {
+            tracing::error!("[PHANTOM] ❌ {}", e);
+            return -2;
+        }
+    };
+    spawn_client_with_bound_listener(
+        ClientConfig {
+            server_url: url,
+            secret: sec,
+            listen: listen_addr,
+            transport: TransportMode::Auto,
+            ..Default::default()
+        },
+        listener,
+    )
 }
 
 /// Start Phantom Tunnel with CDN bypass configuration.
@@ -227,26 +308,28 @@ pub extern "C" fn phantom_start_cdn(
     };
 
     init_logging();
+    let (listener, listen_addr, _) = match bind_requested_or_auto_listener(listen_port) {
+        Ok(bound) => bound,
+        Err(e) => {
+            tracing::error!("[PHANTOM] ❌ {}", e);
+            return -2;
+        }
+    };
+
     let config = ClientConfig {
         server_url: url,
         secret: sec,
-        listen: format!("127.0.0.1:{}", listen_port),
+        listen: listen_addr,
         transport,
         cdn_edge: edge,
         host_override: host,
         fragment: false,
         fragment_size: 40,
         padding: true,
+        sni_override: None,
     };
 
-    thread::spawn(move || {
-        let rt = Runtime::new().expect("Failed to create tokio runtime");
-        rt.block_on(async {
-            start_client_with_config(config).await;
-        });
-    });
-
-    0 // Success
+    spawn_client_with_bound_listener(config, listener)
 }
 
 // ─── JNI (Android) ─────────────────────────────────────────────
@@ -256,7 +339,7 @@ pub mod android {
     use super::*;
     use jni::errors::LogErrorAndDefault;
     use jni::objects::{JClass, JObject};
-    use jni::sys::jint;
+    use jni::sys::{jint, jstring};
     use jni::{objects::JString, EnvUnowned};
 
     #[no_mangle]
@@ -285,6 +368,19 @@ pub mod android {
         tracing::info!("[PHANTOM] Rust log callback delivered output to Kotlin");
     }
 
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_copyStatsJson(
+        mut env: EnvUnowned,
+        _class: JClass,
+    ) -> jstring {
+        env.with_env(|env| -> JniResult<jstring> {
+            let json = crate::runtime_stats_json().unwrap_or_else(|| "{}".to_string());
+            let java_string = env.new_string(json)?;
+            Ok(java_string.into_raw())
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
     /// Basic start (backward compatible)
     #[no_mangle]
     pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startClient(
@@ -293,23 +389,33 @@ pub mod android {
         server_url: JString,
         secret: JString,
         listen_port: jint,
-    ) {
-        env.with_env(|env| -> JniResult<()> {
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
             let url = server_url.try_to_string(env)?;
             let sec = secret.try_to_string(env)?;
-            let listen_addr = format!("127.0.0.1:{}", listen_port);
             init_logging();
 
-            thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create tokio runtime");
-                rt.block_on(async {
-                    start_client(url, sec, listen_addr).await;
-                });
-            });
+            let (listener, listen_addr, _) =
+                match bind_requested_or_auto_listener(listen_port as u16) {
+                    Ok(bound) => bound,
+                    Err(e) => {
+                        tracing::error!("[PHANTOM] ❌ {}", e);
+                        return Ok(-2);
+                    }
+                };
 
-            Ok(())
+            Ok(spawn_client_with_bound_listener(
+                ClientConfig {
+                    server_url: url,
+                    secret: sec,
+                    listen: listen_addr,
+                    transport: TransportMode::Auto,
+                    ..Default::default()
+                },
+                listener,
+            ) as jint)
         })
-        .resolve::<LogErrorAndDefault>();
+        .resolve::<LogErrorAndDefault>()
     }
 
     /// CDN bypass start with full configuration
@@ -323,23 +429,15 @@ pub mod android {
         cdn_edge: JString,
         host_override: JString,
         transport_mode: jint,
-    ) {
-        env.with_env(|env| -> JniResult<()> {
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
             let url = server_url.try_to_string(env)?;
             let sec = secret.try_to_string(env)?;
             let edge_str = cdn_edge.try_to_string(env).unwrap_or_default();
             let host_str = host_override.try_to_string(env).unwrap_or_default();
 
-            let edge = if edge_str.is_empty() {
-                None
-            } else {
-                Some(edge_str)
-            };
-            let host = if host_str.is_empty() {
-                None
-            } else {
-                Some(host_str)
-            };
+            let edge = if edge_str.is_empty() { None } else { Some(edge_str) };
+            let host = if host_str.is_empty() { None } else { Some(host_str) };
 
             let transport = match transport_mode {
                 1 => TransportMode::WebSocket,
@@ -347,28 +445,140 @@ pub mod android {
                 _ => TransportMode::Auto,
             };
             init_logging();
+            let (listener, listen_addr, _actual_port) =
+                match bind_requested_or_auto_listener(listen_port as u16) {
+                    Ok(bound) => bound,
+                    Err(e) => {
+                        tracing::error!("[PHANTOM] ❌ {}", e);
+                        return Ok(-2);
+                    }
+                };
 
             let config = ClientConfig {
                 server_url: url,
                 secret: sec,
-                listen: format!("127.0.0.1:{}", listen_port),
+                listen: listen_addr,
                 transport,
                 cdn_edge: edge,
                 host_override: host,
                 fragment: false,
                 fragment_size: 40,
                 padding: true,
+                sni_override: None,
             };
 
-            thread::spawn(move || {
-                let rt = Runtime::new().expect("Failed to create tokio runtime");
-                rt.block_on(async {
-                    start_client_with_config(config).await;
-                });
-            });
-
-            Ok(())
+            Ok(spawn_client_with_bound_listener(config, listener) as jint)
         })
-        .resolve::<LogErrorAndDefault>();
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    /// Full configuration start — CDN edge + host override + custom SNI for DPI bypass
+    /// Use this for Starlink relay mode or any scenario where SNI spoofing is needed.
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startClientFull(
+        mut env: EnvUnowned,
+        _class: JClass,
+        server_url: JString,
+        secret: JString,
+        listen_port: jint,
+        cdn_edge: JString,
+        host_override: JString,
+        sni_override: JString,
+        transport_mode: jint,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let url = server_url.try_to_string(env)?;
+            let sec = secret.try_to_string(env)?;
+            let edge_str = cdn_edge.try_to_string(env).unwrap_or_default();
+            let host_str = host_override.try_to_string(env).unwrap_or_default();
+            let sni_str = sni_override.try_to_string(env).unwrap_or_default();
+
+            let edge = if edge_str.is_empty() { None } else { Some(edge_str) };
+            let host = if host_str.is_empty() { None } else { Some(host_str) };
+            let sni = if sni_str.is_empty() { None } else { Some(sni_str) };
+
+            let transport = match transport_mode {
+                1 => TransportMode::WebSocket,
+                2 => TransportMode::Http,
+                _ => TransportMode::Auto,
+            };
+            init_logging();
+            let (listener, listen_addr, _actual_port) =
+                match bind_requested_or_auto_listener(listen_port as u16) {
+                    Ok(bound) => bound,
+                    Err(e) => {
+                        tracing::error!("[PHANTOM] ❌ {}", e);
+                        return Ok(-2);
+                    }
+                };
+
+            let config = ClientConfig {
+                server_url: url,
+                secret: sec,
+                listen: listen_addr,
+                transport,
+                cdn_edge: edge,
+                host_override: host,
+                sni_override: sni,
+                fragment: false,
+                fragment_size: 40,
+                padding: true,
+            };
+
+            tracing::info!(
+                "[PHANTOM] startClientFull: SNI={:?}",
+                config.sni_override
+            );
+
+            Ok(spawn_client_with_bound_listener(config, listener) as jint)
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startTun2Socks(
+        mut env: EnvUnowned,
+        _class: JClass,
+        tun_fd: jint,
+        socks_address: JString,
+        socks_port: jint,
+        mtu: jint,
+        dns_address: JString,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let socks_addr = socks_address.try_to_string(env)?;
+            let dns_addr = dns_address.try_to_string(env).unwrap_or_default();
+            init_logging();
+
+            let dns = if dns_addr.trim().is_empty() {
+                None
+            } else {
+                Some(dns_addr.as_str())
+            };
+
+            match crate::android_tun::start_android_tun_bridge(
+                tun_fd,
+                &socks_addr,
+                socks_port as u16,
+                mtu,
+                dns,
+            ) {
+                Ok(()) => Ok(0),
+                Err(error) => {
+                    tracing::error!("[PHANTOM] ❌ {}", error);
+                    Ok(-1)
+                }
+            }
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_stopTun2Socks(
+        _env: EnvUnowned,
+        _class: JClass,
+    ) {
+        init_logging();
+        crate::android_tun::stop_android_tun_bridge();
     }
 }

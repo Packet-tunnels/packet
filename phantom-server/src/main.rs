@@ -1,13 +1,15 @@
-// phantom-server: Covert HTTP tunnel server with WebSocket support
+// phantom-server: Covert HTTP tunnel server with WebSocket + Relay support
 //
-// This server does three things simultaneously:
+// This server does four things simultaneously:
 // 1. Serves a real static website (piano lessons) to look legitimate
 // 2. Provides authenticated HTTP POST tunnel API for Phantom clients
 // 3. Provides authenticated WebSocket tunnel for persistent connections
+// 4. Accepts Starlink relay nodes that provide unfiltered internet exit
 //
-// The tunnel data is hidden inside normal-looking JSON API calls
-// and WebSocket frames. To censors and probes, this looks like
-// a standard web application with real-time features.
+// Relay Architecture (Starlink bypass):
+//   Mobile Client (Iran) → GCP Server → Relay Node (Starlink) → Free Internet
+//   The relay node connects OUTBOUND to GCP, so it needs no public IP.
+//   GCP forwards all client traffic through the relay for internet access.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -32,7 +34,7 @@ use tracing::{error, info, warn};
 // ─── CLI ───────────────────────────────────────────────────────
 #[derive(Parser)]
 #[command(name = "phantom-server")]
-#[command(about = "Phantom Tunnel Server — covert HTTP tunnel with WebSocket")]
+#[command(about = "Phantom Tunnel Server — covert HTTP tunnel with WebSocket + Relay")]
 struct Cli {
     /// Port to listen on
     #[arg(short, long, default_value = "80")]
@@ -54,6 +56,20 @@ struct AppState {
     key: [u8; 32],
     max_drift: u64,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Active relay nodes (Starlink exit nodes)
+    relay_nodes: Mutex<Vec<Arc<RelayNode>>>,
+}
+
+impl AppState {
+    /// Get the best available relay node, or None to use direct exit.
+    async fn get_relay(&self) -> Option<Arc<RelayNode>> {
+        let relays = self.relay_nodes.lock().await;
+        // Pick the relay with fewest active streams (simple load balancing)
+        relays.iter()
+            .filter(|r| r.is_alive())
+            .min_by_key(|r| r.active_streams.load(std::sync::atomic::Ordering::Relaxed))
+            .cloned()
+    }
 }
 
 struct Session {
@@ -73,6 +89,46 @@ impl Session {
     }
 }
 
+// ─── Relay Node ────────────────────────────────────────────────
+// A relay node is a Starlink terminal (or any unfiltered exit) that
+// maintains a persistent WebSocket connection to this server.
+// When clients need to connect to the internet, the server forwards
+// Connect/Data/Close frames to the relay, which makes the actual
+// TCP connections and returns data.
+
+struct RelayNode {
+    /// Channel to send frames TO the relay node
+    tx: mpsc::Sender<Frame>,
+    /// Track pending connect responses from relay
+    pending_connects: Mutex<HashMap<u32, mpsc::Sender<Frame>>>,
+    /// Number of active streams through this relay
+    active_streams: std::sync::atomic::AtomicU32,
+    /// Whether the relay is still connected
+    alive: std::sync::atomic::AtomicBool,
+    /// Label for logging
+    label: String,
+}
+
+impl RelayNode {
+    fn new(tx: mpsc::Sender<Frame>, label: String) -> Self {
+        Self {
+            tx,
+            pending_connects: Mutex::new(HashMap::new()),
+            active_streams: std::sync::atomic::AtomicU32::new(0),
+            alive: std::sync::atomic::AtomicBool::new(true),
+            label,
+        }
+    }
+
+    fn is_alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn mark_dead(&self) {
+        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 // ─── Main ──────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -85,14 +141,16 @@ async fn main() {
     let cli = Cli::parse();
     let key = derive_key(&cli.secret);
 
-    info!("[PHANTOM] Server v0.2.0 starting on port {}", cli.port);
+    info!("[PHANTOM] Server v0.3.0 starting on port {}", cli.port);
     info!("[PHANTOM] Max auth drift: {}s", cli.max_drift);
+    info!("[PHANTOM] Relay node support: ENABLED");
 
     let state = Arc::new(AppState {
         secret: cli.secret.clone(),
         key,
         max_drift: cli.max_drift,
         sessions: Mutex::new(HashMap::new()),
+        relay_nodes: Mutex::new(Vec::new()),
     });
 
     // Spawn session cleanup task
@@ -101,9 +159,15 @@ async fn main() {
         loop {
             tokio::time::sleep(Duration::from_secs(300)).await;
             let mut sessions = cleanup_state.sessions.lock().await;
-            // Remove sessions with no active streams and no references
             sessions.retain(|_token, session| Arc::strong_count(session) > 1);
-            info!("Session cleanup: {} active sessions", sessions.len());
+            // Clean dead relay nodes
+            let mut relays = cleanup_state.relay_nodes.lock().await;
+            relays.retain(|r| r.is_alive());
+            info!(
+                "Cleanup: {} active sessions, {} relay nodes",
+                sessions.len(),
+                relays.len()
+            );
         }
     });
 
@@ -117,6 +181,8 @@ async fn main() {
         .route("/api/v1/lessons/sync", post(handle_sync))
         // WebSocket endpoint — looks like a live lesson streaming feature
         .route("/api/v1/lessons/live", get(ws_upgrade))
+        // Relay endpoint — looks like a teacher's streaming setup
+        .route("/api/v1/lessons/broadcast", get(relay_upgrade))
         // Health check (looks normal)
         .route("/api/v1/health", get(health_check))
         .with_state(state);
@@ -156,8 +222,15 @@ h1{color:#2c3e50}a{color:#3498db}</style></head>
 <p><a href="/">← Back to Home</a></p></body></html>"#)
 }
 
-async fn health_check() -> impl IntoResponse {
-    Json(serde_json::json!({"status": "ok", "service": "piano-lessons-api"}))
+async fn health_check(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let relay_count = state.relay_nodes.lock().await.iter().filter(|r| r.is_alive()).count();
+    Json(serde_json::json!({
+        "status": "ok",
+        "service": "piano-lessons-api",
+        "features": relay_count,
+    }))
 }
 
 // ─── Authentication ────────────────────────────────────────────
@@ -205,10 +278,208 @@ async fn handle_auth(
     (StatusCode::OK, Json(serde_json::json!({"token": token})))
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Relay Node Handler (Starlink Exit Node)
+// ═══════════════════════════════════════════════════════════════
+//
+// A relay node (running on Starlink) connects here and says:
+// "I can make TCP connections to the open internet."
+//
+// The server then routes client traffic through this relay
+// instead of making direct connections from GCP.
+//
+// To censors, this endpoint looks like a "teacher broadcasting"
+// their lesson content — a normal WebSocket for video streaming.
+
+async fn relay_upgrade(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_relay_websocket(socket, state))
+}
+
+async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    info!("[RELAY] New relay connection, waiting for auth...");
+
+    // ── Step 1: Authenticate ──
+    let auth_msg = match tokio::time::timeout(
+        Duration::from_secs(10),
+        ws_receiver.next(),
+    )
+    .await
+    {
+        Ok(Some(Ok(Message::Text(text)))) => text,
+        _ => {
+            warn!("[RELAY] Auth failed: no valid message received");
+            return;
+        }
+    };
+
+    let auth_json: serde_json::Value = match serde_json::from_str(&auth_msg) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = ws_sender.send(Message::Text(r#"{"error":"invalid request"}"#.into())).await;
+            return;
+        }
+    };
+
+    // Check auth credentials
+    let ts = auth_json["ts"].as_u64().unwrap_or(0);
+    let sig = auth_json["sig"].as_str().unwrap_or("");
+
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let drift = if ts > now { ts - now } else { now - ts };
+
+    if drift > state.max_drift || !verify_auth(&state.secret, ts, sig) {
+        warn!("[RELAY] Auth rejected");
+        let _ = ws_sender.send(Message::Text(r#"{"error":"unauthorized"}"#.into())).await;
+        return;
+    }
+
+    // Check for relay mode flag
+    let mode = auth_json["mode"].as_str().unwrap_or("");
+    if mode != "relay" {
+        warn!("[RELAY] Not a relay auth (mode='{}')", mode);
+        let _ = ws_sender.send(Message::Text(r#"{"error":"invalid mode"}"#.into())).await;
+        return;
+    }
+
+    let relay_label = auth_json["label"].as_str().unwrap_or("unknown").to_string();
+
+    // Accept the relay
+    let relay_id = generate_session_token();
+    let _ = ws_sender.send(Message::Text(
+        serde_json::json!({"relay_id": &relay_id, "status": "accepted"}).to_string()
+    )).await;
+
+    info!("[RELAY] ✓ Relay node '{}' authenticated: {}...", relay_label, &relay_id[..16]);
+
+    let key = state.key;
+
+    // Channel for sending frames TO the relay (server → relay)
+    let (relay_tx, mut relay_rx) = mpsc::channel::<Frame>(4096);
+
+    let relay_node = Arc::new(RelayNode::new(relay_tx, relay_label.clone()));
+
+    // Register the relay
+    {
+        let mut relays = state.relay_nodes.lock().await;
+        relays.push(relay_node.clone());
+        info!("[RELAY] {} relay nodes now active", relays.len());
+    }
+
+    // ── Sender task: frames from server → encrypt → WS → relay node ──
+    let sender_relay = relay_node.clone();
+    let sender_task = tokio::spawn(async move {
+        loop {
+            let mut frames = Vec::new();
+
+            tokio::select! {
+                result = relay_rx.recv() => {
+                    match result {
+                        Some(frame) => frames.push(frame),
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(25)) => {
+                    // Keepalive ping
+                    if ws_sender.send(Message::Ping(vec![0x52, 0x4C])).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+
+            // Drain queued frames
+            while let Ok(f) = relay_rx.try_recv() {
+                frames.push(f);
+                if frames.len() >= 256 { break; }
+            }
+
+            if !frames.is_empty() {
+                let plaintext = encode_frames(&frames);
+                let encrypted = encrypt(&key, &plaintext);
+                if ws_sender.send(Message::Binary(encrypted)).await.is_err() {
+                    break;
+                }
+            }
+        }
+        sender_relay.mark_dead();
+    });
+
+    // ── Receiver task: WS → decrypt → frames from relay node → route back to client sessions ──
+    let receiver_relay = relay_node.clone();
+    let receiver_state = state.clone();
+    let receiver_task = tokio::spawn(async move {
+        while let Some(msg) = ws_receiver.next().await {
+            match msg {
+                Ok(Message::Binary(data)) => {
+                    match decrypt(&key, &data) {
+                        Ok(plaintext) => {
+                            match decode_frames(&plaintext) {
+                                Ok(frames) => {
+                                    for frame in frames {
+                                        // Route relay responses back to the appropriate client session
+                                        relay_dispatch_to_client(
+                                            frame,
+                                            &receiver_relay,
+                                            &receiver_state,
+                                        ).await;
+                                    }
+                                }
+                                Err(e) => error!("[RELAY] Frame decode error: {}", e),
+                            }
+                        }
+                        Err(e) => error!("[RELAY] Decrypt error: {}", e),
+                    }
+                }
+                Ok(Message::Close(_)) => {
+                    info!("[RELAY] Relay node disconnected cleanly");
+                    break;
+                }
+                Err(e) => {
+                    warn!("[RELAY] WS error: {}", e);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        receiver_relay.mark_dead();
+    });
+
+    tokio::select! {
+        _ = sender_task => {},
+        _ = receiver_task => {},
+    }
+
+    // Remove dead relay
+    relay_node.mark_dead();
+    let mut relays = state.relay_nodes.lock().await;
+    relays.retain(|r| r.is_alive());
+    info!("[RELAY] Relay '{}' removed. {} nodes remaining.", relay_label, relays.len());
+}
+
+/// Route a frame received FROM the relay back to the client session that requested it.
+/// The relay sends ConnectOk/ConnectErr/Data/Close frames with stream_ids that map
+/// to the original client session's stream_ids.
+async fn relay_dispatch_to_client(
+    frame: Frame,
+    relay: &Arc<RelayNode>,
+    _state: &Arc<AppState>,
+) {
+    let pending = relay.pending_connects.lock().await;
+    if let Some(session_tx) = pending.get(&frame.stream_id) {
+        if session_tx.send(frame).await.is_err() {
+            // Session is dead, clean up
+            drop(pending);
+            relay.pending_connects.lock().await.remove(&frame.stream_id);
+            relay.active_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
 // ─── WebSocket Tunnel ──────────────────────────────────────────
-// Persistent bidirectional tunnel over WebSocket.
-// Looks like a real-time lesson streaming feature to censors.
-// This is the primary transport for CDN-based bypass (ArvanCloud).
 
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
@@ -293,13 +564,16 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
         .await
         .insert(token.clone(), session.clone());
 
+    // Check if relay routing is available
+    let has_relay = state.get_relay().await.is_some();
+
     let _ = ws_sender
         .send(Message::Text(
-            serde_json::json!({"token": &token}).to_string(),
+            serde_json::json!({"token": &token, "relay": has_relay}).to_string(),
         ))
         .await;
 
-    info!("[PHANTOM] ✓ WS session established: {}...", &token[..16]);
+    info!("[PHANTOM] ✓ WS session established: {}... (relay: {})", &token[..16], has_relay);
 
     let key = state.key;
 
@@ -312,16 +586,14 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
         loop {
             let mut frames = Vec::new();
 
-            // Wait for at least one frame or send keepalive
             tokio::select! {
                 result = rx.recv() => {
                     match result {
                         Some(frame) => frames.push(frame),
-                        None => break, // Channel closed
+                        None => break,
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(25)) => {
-                    // Send ping to keep connection alive through CDN/proxy
                     if ws_sender.send(Message::Ping(vec![0x50, 0x48])).await.is_err() {
                         break;
                     }
@@ -329,12 +601,9 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
 
-            // Drain any additional available frames
             while let Ok(f) = rx.try_recv() {
                 frames.push(f);
-                if frames.len() >= 256 {
-                    break;
-                }
+                if frames.len() >= 256 { break; }
             }
 
             if !frames.is_empty() {
@@ -349,6 +618,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
 
     // Receiver task: WebSocket → upstream frame processing
     let session_rx = session.clone();
+    let rx_state = state.clone();
     let receiver_task = tokio::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
@@ -358,7 +628,11 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
                             match decode_frames(&plaintext) {
                                 Ok(frames) => {
                                     for frame in frames {
-                                        process_upstream_frame(frame, &session_rx).await;
+                                        process_upstream_frame_with_relay(
+                                            frame,
+                                            &session_rx,
+                                            &rx_state,
+                                        ).await;
                                     }
                                 }
                                 Err(e) => error!("[PHANTOM] Frame decode error: {} ({}B)", e, plaintext.len()),
@@ -367,9 +641,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
                         Err(e) => error!("[PHANTOM] Decrypt error from client: {} ({}B — key mismatch?)", e, data.len()),
                     }
                 }
-                Ok(Message::Ping(_)) => {
-                    // Pong is sent automatically by axum
-                }
+                Ok(Message::Ping(_)) => {}
                 Ok(Message::Close(reason)) => {
                     info!("[PHANTOM] WS closed by client: {:?}", reason);
                     break;
@@ -378,92 +650,72 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
                     warn!("[PHANTOM] WS receive error: {}", e);
                     break;
                 }
-                _ => {} // Ignore text/pong after auth
+                _ => {}
             }
         }
     });
 
-    // Wait for either task to finish
     tokio::select! {
         _ = sender_task => {},
         _ = receiver_task => {},
     }
 
-    // Cleanup session
     state.sessions.lock().await.remove(&token);
     info!("[PHANTOM] WS session closed: {}...", &token[..16]);
 }
 
-// ─── Shared Frame Processing ───────────────────────────────────
-// Used by both HTTP sync and WebSocket handlers.
+// ─── Frame Processing (with Relay Support) ─────────────────────
+// If a relay node is available, forward Connect/Data/Close to the relay.
+// Otherwise, make direct TCP connections from the server (fallback).
 
-async fn process_upstream_frame(frame: Frame, session: &Arc<Session>) {
+async fn process_upstream_frame_with_relay(
+    frame: Frame,
+    session: &Arc<Session>,
+    state: &Arc<AppState>,
+) {
+    // Try to get a relay node
+    let relay = state.get_relay().await;
+
     match frame.cmd {
         Cmd::Connect => {
             let addr = String::from_utf8_lossy(&frame.data).to_string();
             let stream_id = frame.stream_id;
-            let tx = session.downstream_tx.clone();
-            let session = session.clone();
 
-            info!("Stream {} connecting to {}", stream_id, addr);
+            if let Some(relay) = relay {
+                // ── Route through relay (Starlink exit) ──
+                info!("[RELAY-ROUTE] Stream {} → relay '{}' → {}", stream_id, relay.label, addr);
 
-            tokio::spawn(async move {
-                match TcpStream::connect(&addr).await {
-                    Ok(tcp) => {
-                        let (mut read_half, write_half) = tcp.into_split();
-                        session
-                            .writers
-                            .lock()
-                            .await
-                            .insert(stream_id, write_half);
+                // Register this stream's session downstream_tx so relay responses come back
+                relay.pending_connects.lock().await.insert(stream_id, session.downstream_tx.clone());
+                relay.active_streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                        // Send connect OK
-                        let _ = tx.send(Frame::connect_ok(stream_id)).await;
-                        info!("Stream {} connected to {}", stream_id, addr);
-
-                        // Spawn reader: TCP → downstream channel
-                        let tx2 = tx.clone();
-                        tokio::spawn(async move {
-                            let mut buf = vec![0u8; 16384];
-                            loop {
-                                match read_half.read(&mut buf).await {
-                                    Ok(0) => {
-                                        let _ =
-                                            tx2.send(Frame::close(stream_id)).await;
-                                        break;
-                                    }
-                                    Ok(n) => {
-                                        let _ = tx2
-                                            .send(Frame::data(
-                                                stream_id,
-                                                buf[..n].to_vec(),
-                                            ))
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "Stream {} read error: {}",
-                                            stream_id, e
-                                        );
-                                        let _ =
-                                            tx2.send(Frame::close(stream_id)).await;
-                                        break;
-                                    }
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        error!("Stream {} connect failed: {}", stream_id, e);
-                        let _ = tx
-                            .send(Frame::connect_err(stream_id, &e.to_string()))
-                            .await;
-                    }
+                // Forward the Connect frame to the relay
+                if relay.tx.send(Frame::connect(stream_id, &addr)).await.is_err() {
+                    error!("[RELAY-ROUTE] Failed to send to relay, falling back to direct");
+                    relay.mark_dead();
+                    // Fallback: direct connection
+                    process_upstream_frame_direct(frame, session).await;
                 }
-            });
+            } else {
+                // ── Direct connection (no relay available) ──
+                process_upstream_frame_direct(frame, session).await;
+            }
         }
 
         Cmd::Data => {
+            if let Some(relay) = relay {
+                // Check if this stream is routed through a relay
+                let pending = relay.pending_connects.lock().await;
+                if pending.contains_key(&frame.stream_id) {
+                    drop(pending);
+                    // Forward data to relay
+                    if relay.tx.send(frame).await.is_err() {
+                        relay.mark_dead();
+                    }
+                    return;
+                }
+            }
+            // Direct path: write to local TCP connection
             let mut writers = session.writers.lock().await;
             if let Some(writer) = writers.get_mut(&frame.stream_id) {
                 if let Err(e) = writer.write_all(&frame.data).await {
@@ -479,9 +731,78 @@ async fn process_upstream_frame(frame: Frame, session: &Arc<Session>) {
 
         Cmd::Close => {
             info!("Stream {} closed by client", frame.stream_id);
+            if let Some(relay) = relay {
+                let mut pending = relay.pending_connects.lock().await;
+                if pending.remove(&frame.stream_id).is_some() {
+                    relay.active_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    drop(pending);
+                    let _ = relay.tx.send(frame).await;
+                    return;
+                }
+            }
             session.writers.lock().await.remove(&frame.stream_id);
         }
 
+        _ => {}
+    }
+}
+
+/// Direct connection (fallback when no relay is available)
+async fn process_upstream_frame_direct(frame: Frame, session: &Arc<Session>) {
+    match frame.cmd {
+        Cmd::Connect => {
+            let addr = String::from_utf8_lossy(&frame.data).to_string();
+            let stream_id = frame.stream_id;
+            let tx = session.downstream_tx.clone();
+            let session = session.clone();
+
+            info!("[DIRECT] Stream {} connecting to {}", stream_id, addr);
+
+            tokio::spawn(async move {
+                match TcpStream::connect(&addr).await {
+                    Ok(tcp) => {
+                        let (mut read_half, write_half) = tcp.into_split();
+                        session
+                            .writers
+                            .lock()
+                            .await
+                            .insert(stream_id, write_half);
+
+                        let _ = tx.send(Frame::connect_ok(stream_id)).await;
+                        info!("[DIRECT] Stream {} connected to {}", stream_id, addr);
+
+                        let tx2 = tx.clone();
+                        tokio::spawn(async move {
+                            let mut buf = vec![0u8; 16384];
+                            loop {
+                                match read_half.read(&mut buf).await {
+                                    Ok(0) => {
+                                        let _ = tx2.send(Frame::close(stream_id)).await;
+                                        break;
+                                    }
+                                    Ok(n) => {
+                                        let _ = tx2
+                                            .send(Frame::data(stream_id, buf[..n].to_vec()))
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        error!("Stream {} read error: {}", stream_id, e);
+                                        let _ = tx2.send(Frame::close(stream_id)).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("[DIRECT] Stream {} connect failed: {}", stream_id, e);
+                        let _ = tx
+                            .send(Frame::connect_err(stream_id, &e.to_string()))
+                            .await;
+                    }
+                }
+            });
+        }
         _ => {}
     }
 }
@@ -527,9 +848,9 @@ async fn handle_sync(
 
     let upstream_frames = decode_frames(&plaintext).unwrap_or_default();
 
-    // Process upstream frames using shared function
+    // Process upstream frames (with relay support)
     for frame in upstream_frames {
-        process_upstream_frame(frame, &session).await;
+        process_upstream_frame_with_relay(frame, &session, &state).await;
     }
 
     // Give spawned tasks a moment to produce downstream data
