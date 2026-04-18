@@ -160,6 +160,15 @@ data class TunnelConfiguration(
         get() = transportMode.title
 }
 
+private fun JSONObject.optNullableString(key: String): String? {
+    if (!has(key) || isNull(key)) {
+        return null
+    }
+
+    return optString(key)
+        .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+}
+
 data class TunnelSnapshot(
     val state: TunnelState = TunnelState.IDLE,
     val message: String = "Ready",
@@ -216,7 +225,7 @@ data class TunnelRuntimeSnapshot(
                     state = json.optString("state", "idle"),
                     transport = json.optString("transport", "Unknown"),
                     serverHost = json.optString("server_host", ""),
-                    cdnEdge = json.optString("cdn_edge").takeIf { it.isNotBlank() },
+                    cdnEdge = json.optNullableString("cdn_edge"),
                     listenPort = json.optInt("listen_port").takeIf { it > 0 },
                     bytesUp = json.optLong("bytes_up", 0),
                     bytesDown = json.optLong("bytes_down", 0),
@@ -224,7 +233,7 @@ data class TunnelRuntimeSnapshot(
                     totalStreams = json.optLong("total_streams", 0),
                     connectedSince = json.optLong("connected_since").takeIf { it > 0 },
                     lastPingMs = json.optInt("last_ping_ms").takeIf { it > 0 },
-                    lastError = json.optString("last_error").takeIf { it.isNotBlank() },
+                    lastError = json.optNullableString("last_error"),
                     tunnelActive = json.optBoolean("tunnel_active", false),
                 )
             }.getOrDefault(empty)
@@ -282,7 +291,7 @@ data class TunnelDiagnosticsSnapshot(
                     vpnShellReady = json.optBoolean("vpn_shell_ready", false),
                     routingComparison = json.optString("routing_comparison", ""),
                     recommendation = json.optString("recommendation", ""),
-                    lastFailureDetail = json.optString("last_failure_detail").takeIf { it.isNotBlank() },
+                    lastFailureDetail = json.optNullableString("last_failure_detail"),
                     lastUpdatedMs = json.optLong("last_updated_ms").takeIf { it > 0 },
                 )
             }.getOrDefault(empty)

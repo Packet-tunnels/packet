@@ -46,10 +46,6 @@ fn build_android_tun2socks_config(
     )
 }
 
-pub fn default_map_dns_ipv4() -> &'static str {
-    DEFAULT_MAP_DNS_IPV4
-}
-
 pub fn start_android_tun_bridge(
     tun_fd: i32,
     socks_addr: &str,

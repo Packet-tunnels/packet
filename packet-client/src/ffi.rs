@@ -4,6 +4,7 @@ use std::os::raw::c_char;
 use std::sync::Mutex;
 use std::thread;
 use tokio::runtime::Runtime;
+use tokio::sync::watch;
 use tracing_subscriber::fmt::MakeWriter;
 
 #[cfg(target_os = "android")]
@@ -17,6 +18,15 @@ use jni::JavaVM;
 
 lazy_static::lazy_static! {
     static ref LOG_CALLBACK: Mutex<Option<extern "C" fn(*const c_char)>> = Mutex::new(None);
+}
+
+struct ActiveClient {
+    shutdown_tx: watch::Sender<bool>,
+    handle: thread::JoinHandle<()>,
+}
+
+lazy_static::lazy_static! {
+    static ref ACTIVE_CLIENT: Mutex<Option<ActiveClient>> = Mutex::new(None);
 }
 
 #[cfg(target_os = "android")]
@@ -170,14 +180,28 @@ fn spawn_client_with_bound_listener(config: ClientConfig, listener: std::net::Tc
         .map(|address| address.port())
         .unwrap_or_default();
 
-    thread::spawn(move || {
+    stop_active_client();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = thread::spawn(move || {
         let rt = Runtime::new().expect("Failed to create tokio runtime");
         rt.block_on(async {
-            start_client_with_listener(config, listener).await;
+            start_client_with_listener(config, listener, shutdown_rx).await;
         });
     });
 
+    *ACTIVE_CLIENT.lock().unwrap() = Some(ActiveClient { shutdown_tx, handle });
+
     i32::from(actual_port)
+}
+
+fn stop_active_client() {
+    let active_client = ACTIVE_CLIENT.lock().unwrap().take();
+    if let Some(active_client) = active_client {
+        let _ = active_client.shutdown_tx.send(true);
+        let _ = active_client.handle.join();
+        crate::clear_runtime_stats();
+    }
 }
 
 #[no_mangle]
@@ -208,6 +232,12 @@ pub extern "C" fn phantom_free_string(s: *mut c_char) {
     unsafe {
         let _ = CString::from_raw(s);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_stop_client() {
+    init_logging();
+    stop_active_client();
 }
 
 /// Start Phantom Tunnel with basic configuration (backward compatible).
@@ -379,6 +409,15 @@ pub mod android {
             Ok(java_string.into_raw())
         })
         .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_stopClient(
+        _env: EnvUnowned,
+        _class: JClass,
+    ) {
+        init_logging();
+        stop_active_client();
     }
 
     /// Basic start (backward compatible)

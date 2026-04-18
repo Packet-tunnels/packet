@@ -10,6 +10,10 @@ enum TunnelConstants {
     static let maxLogEntries = 200
 }
 
+enum SharedTunnelPreferenceKeys {
+    static let vpnDisclosureAcknowledged = "vpnDisclosureAcknowledged"
+}
+
 enum TunnelProviderKeys {
     static let serverURL = "serverURL"
     static let secret = "secret"
@@ -234,6 +238,20 @@ struct TunnelRuntimeSnapshot: Decodable, Equatable {
         }
 
         return serverHost
+    }
+}
+
+enum SharedTunnelPreferenceStore {
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: TunnelConstants.appGroupIdentifier) ?? .standard
+    }
+
+    static var vpnDisclosureAcknowledged: Bool {
+        defaults.bool(forKey: SharedTunnelPreferenceKeys.vpnDisclosureAcknowledged)
+    }
+
+    static func setVPNDisclosureAcknowledged(_ acknowledged: Bool) {
+        defaults.set(acknowledged, forKey: SharedTunnelPreferenceKeys.vpnDisclosureAcknowledged)
     }
 }
 

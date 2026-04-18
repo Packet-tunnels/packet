@@ -25,6 +25,8 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".AutoScannerActivity" android:exported="false" />
+
         <service
             android:name=".TunnelVpnService"
             android:exported="false"

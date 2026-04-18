@@ -255,18 +255,6 @@ mod hex {
     pub fn encode(data: &[u8]) -> String {
         data.iter().map(|b| format!("{:02x}", b)).collect()
     }
-
-    pub fn decode(s: &str) -> Result<Vec<u8>, &'static str> {
-        if s.len() % 2 != 0 {
-            return Err("odd hex length");
-        }
-        (0..s.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| "invalid hex")
-            })
-            .collect()
-    }
 }
 
 // ─── Base64 helpers ────────────────────────────────────────────

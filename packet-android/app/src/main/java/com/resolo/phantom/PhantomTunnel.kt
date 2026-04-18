@@ -17,6 +17,9 @@ object PhantomTunnel {
     external fun copyStatsJson(): String?
 
     @JvmStatic
+    external fun stopClient()
+
+    @JvmStatic
     external fun startClient(serverUrl: String, secret: String, listenPort: Int): Int
 
     @JvmStatic

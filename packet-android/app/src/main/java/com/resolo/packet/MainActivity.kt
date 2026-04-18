@@ -78,6 +78,7 @@ class MainActivity : Activity() {
     private lateinit var logsMetaText: TextView
     private lateinit var toggleLogsButton: Button
     private lateinit var logsContent: View
+    private lateinit var autoScannerButton: Button
     private lateinit var logsView: TextView
     private lateinit var logsScrollView: ScrollView
     private lateinit var bottomBar: View
@@ -88,6 +89,7 @@ class MainActivity : Activity() {
     private var rateAnchor: RuntimeRateAnchor? = null
     private var logsCollapsed = true
     private val uiHandler = Handler(Looper.getMainLooper())
+    private val logRenderRunnable = Runnable { renderLogs() }
 
     private val stalledConnectRunnable = Runnable {
         val stateRecovered = reconcileStalledTunnelState()
@@ -100,17 +102,14 @@ class MainActivity : Activity() {
 
     private val logCallback = object : PacketBridge.LogCallback {
         override fun onLog(message: String) {
-            runOnUiThread {
-                TunnelLogStore.append(applicationContext, message.trimEnd())
-                renderLogs()
-            }
+            TunnelLogStore.append(applicationContext, message.trimEnd())
         }
     }
 
     private val tunnelEventReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                TunnelActions.ACTION_LOG_UPDATED -> renderLogs()
+                TunnelActions.ACTION_LOG_UPDATED -> requestLogRender()
                 TunnelActions.ACTION_STATE_UPDATED -> {
                     val state = intent.getStringExtra("state")
                     val message = intent.getStringExtra("message")
@@ -161,6 +160,7 @@ class MainActivity : Activity() {
         settingsButton = findViewById(R.id.settingsButton)
         startButton = findViewById(R.id.startButton)
         logsMetaText = findViewById(R.id.logsMetaText)
+        autoScannerButton = findViewById(R.id.autoScannerButton)
         toggleLogsButton = findViewById(R.id.toggleLogsButton)
         logsContent = findViewById(R.id.logsContent)
         logsView = findViewById(R.id.logsView)
@@ -187,6 +187,10 @@ class MainActivity : Activity() {
 
         toggleLogsButton.setOnClickListener {
             setLogsCollapsed(!logsCollapsed)
+        }
+
+        autoScannerButton.setOnClickListener {
+            startActivity(Intent(this, AutoScannerActivity::class.java))
         }
 
         startButton.setOnTouchListener { view, event ->
@@ -245,6 +249,7 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         uiHandler.removeCallbacks(stalledConnectRunnable)
+        uiHandler.removeCallbacks(logRenderRunnable)
         if (receiverRegistered) {
             unregisterReceiver(tunnelEventReceiver)
             receiverRegistered = false
@@ -549,21 +554,28 @@ class MainActivity : Activity() {
 
     private fun renderLogs() {
         val logs = TunnelLogStore.load(this)
-        logsMetaText.text = when {
-            logs.isEmpty() -> "No logs yet"
-            logsCollapsed -> "${logs.size} lines hidden"
-            else -> "${logs.size} lines"
-        }
-        logsView.text = if (logs.isEmpty()) {
-            "No logs yet."
-        } else {
-            logs.joinToString(separator = "\n") { formatLogLineForDisplay(it) }
+        if (logs.isEmpty()) {
+            logsMetaText.text = "No logs yet"
+            logsView.text = "No logs yet."
+            return
         }
 
-        if (!logsCollapsed) {
-            logsScrollView.post {
-                logsScrollView.scrollTo(0, logsView.bottom)
-            }
+        if (logsCollapsed) {
+            logsMetaText.text = "${logs.size} lines hidden"
+            logsView.text = ""
+            return
+        }
+
+        val visibleLogs = logs.takeLast(MAX_VISIBLE_LOG_LINES)
+        logsMetaText.text = if (visibleLogs.size == logs.size) {
+            "${logs.size} lines"
+        } else {
+            "Showing latest ${visibleLogs.size} of ${logs.size} lines"
+        }
+        logsView.text = visibleLogs.joinToString(separator = "\n") { formatLogLineForDisplay(it) }
+
+        logsScrollView.post {
+            logsScrollView.scrollTo(0, logsView.bottom)
         }
     }
 
@@ -581,6 +593,12 @@ class MainActivity : Activity() {
     ) {
         val palette = statusPalette(snapshot)
         val isRunning = snapshot.state == TunnelState.RUNNING || runtime.tunnelActive
+        val upstreamReady = runtime.tunnelActive ||
+            runtime.connectedSince != null ||
+            runtime.state.equals("connected", ignoreCase = true)
+        val shellReady = snapshot.state == TunnelState.RUNNING &&
+            diagnostics.localProxyReady &&
+            diagnostics.vpnShellReady
 
         statusBadge.background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
@@ -598,7 +616,7 @@ class MainActivity : Activity() {
         }
 
         statusBadgeText.text = when (snapshot.state) {
-            TunnelState.RUNNING -> "ACTIVE"
+            TunnelState.RUNNING -> if (upstreamReady) "ACTIVE" else "AUTH"
             TunnelState.CONNECTING -> "STARTING"
             TunnelState.REQUESTING_PERMISSION -> "APPROVAL"
             TunnelState.DISCONNECTING -> "STOPPING"
@@ -608,6 +626,7 @@ class MainActivity : Activity() {
         statusBadgeText.setTextColor(palette.accent)
         statusTimerText.text = when {
             isRunning && runtime.connectedSince != null -> formatConnectedDuration(runtime.connectedSince)
+            shellReady && !upstreamReady -> "Waiting for upstream auth"
             snapshot.state == TunnelState.REQUESTING_PERMISSION -> "Awaiting VPN approval"
             snapshot.state == TunnelState.CONNECTING -> "Bringing tunnel online"
             snapshot.state == TunnelState.DISCONNECTING -> "Shutting down"
@@ -615,7 +634,7 @@ class MainActivity : Activity() {
             else -> "Not connected"
         }
         statusText.text = when (snapshot.state) {
-            TunnelState.RUNNING -> "Tunnel is active"
+            TunnelState.RUNNING -> if (upstreamReady) "Tunnel is active" else "Tunnel shell is active"
             TunnelState.CONNECTING -> "Starting tunnel"
             TunnelState.REQUESTING_PERMISSION -> "VPN approval required"
             TunnelState.DISCONNECTING -> "Stopping tunnel"
@@ -633,6 +652,13 @@ class MainActivity : Activity() {
         diagnostics: TunnelDiagnosticsSnapshot,
     ): String {
         runtime.lastError?.takeIf { it.isNotBlank() }?.let { return it }
+
+        if (snapshot.state == TunnelState.RUNNING && diagnostics.localProxyReady && diagnostics.vpnShellReady) {
+            val transportState = runtime.state.ifBlank { "starting" }
+            if (!runtime.tunnelActive && runtime.connectedSince == null) {
+                return "Local VPN and SOCKS are up, but upstream transport is still $transportState."
+            }
+        }
 
         if (snapshot.state == TunnelState.RUNNING && diagnostics.localProxyReady && diagnostics.vpnShellReady) {
             val port = runtime.listenPort?.toString()
@@ -756,6 +782,11 @@ class MainActivity : Activity() {
             .replace("=", "=\u200B")
             .replace("?", "?\u200B")
             .replace("&", "&\u200B")
+    }
+
+    private fun requestLogRender() {
+        uiHandler.removeCallbacks(logRenderRunnable)
+        uiHandler.postDelayed(logRenderRunnable, LOG_RENDER_DEBOUNCE_MS)
     }
 
     private fun applyBottomBarInsets() {
@@ -899,5 +930,7 @@ class MainActivity : Activity() {
     private companion object {
         const val REQUEST_VPN_PERMISSION = 1001
         const val CONNECT_TIMEOUT_MS = 20_000L
+        const val LOG_RENDER_DEBOUNCE_MS = 150L
+        const val MAX_VISIBLE_LOG_LINES = 250
     }
 }

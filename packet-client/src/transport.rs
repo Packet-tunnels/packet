@@ -21,7 +21,10 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
+use reqwest::header::HOST;
 use reqwest::Client;
+use std::error::Error as _;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -59,8 +62,6 @@ pub struct TransportConfig {
     pub fragment_enabled: bool,
     /// Fragment chunk size in bytes
     pub fragment_size: usize,
-    /// Enable traffic padding
-    pub padding_enabled: bool,
 }
 
 impl TransportConfig {
@@ -107,6 +108,76 @@ impl TransportConfig {
     /// Whether the server URL uses HTTPS/WSS.
     fn is_tls(&self) -> bool {
         self.server_url.starts_with("https")
+    }
+
+    /// Hostname to place in the HTTP URL itself.
+    /// In CDN TLS mode this controls the TLS SNI and must stay on the fronting host,
+    /// while DNS is overridden to the edge IP separately.
+    fn http_request_host(&self) -> String {
+        if self.cdn_edge.is_some() {
+            if self.is_tls() {
+                self.sni_value()
+            } else {
+                self.host_value()
+            }
+        } else {
+            url::Url::parse(&self.server_url)
+                .ok()
+                .and_then(|u| u.host_str().map(|s| s.to_string()))
+                .unwrap_or_else(|| self.host_value())
+        }
+    }
+
+    fn http_request_port(&self) -> Option<u16> {
+        if self.cdn_edge.is_some() {
+            self.connect_addr()
+                .parse::<SocketAddr>()
+                .ok()
+                .map(|socket_addr| socket_addr.port())
+        } else {
+            None
+        }
+    }
+
+    fn http_resolve_override(&self) -> Option<(String, SocketAddr)> {
+        self.cdn_edge.as_ref()?;
+        let request_host = self.http_request_host();
+        let connect_addr = self.connect_addr().parse::<SocketAddr>().ok()?;
+        Some((request_host, connect_addr))
+    }
+
+    /// Get the HTTP endpoint URL to send requests to.
+    /// CDN mode: keep the URL on the fronting hostname, and override DNS to the edge IP.
+    /// Direct mode: use the configured server URL as-is.
+    fn http_request_url(&self, path: &str) -> String {
+        let normalized_path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        };
+
+        if self.cdn_edge.is_some() {
+            let scheme = if self.is_tls() { "https" } else { "http" };
+            let request_host = self.http_request_host();
+            let default_port = if self.is_tls() { 443 } else { 80 };
+            let authority = match self.http_request_port() {
+                Some(port) if port != default_port => format!("{}:{}", request_host, port),
+                _ => request_host,
+            };
+            format!("{}://{}{}", scheme, authority, normalized_path)
+        } else {
+            format!("{}{}", self.server_url.trim_end_matches('/'), normalized_path)
+        }
+    }
+
+    /// Host header for HTTP requests.
+    /// In CDN mode this must stay on the origin-looking host, not the CDN IP.
+    fn http_host_header(&self) -> Option<String> {
+        if self.cdn_edge.is_some() || self.host_header.is_some() {
+            Some(self.host_value())
+        } else {
+            None
+        }
     }
 
     /// Get the SNI to use for TLS handshakes.
@@ -472,15 +543,31 @@ async fn run_http_loop(
     tunnel_state: Arc<Mutex<TunnelState>>,
 ) {
     // Build HTTP client with connection pooling
-    let http_client = Client::builder()
+    let mut client_builder = Client::builder()
         .pool_max_idle_per_host(4)
         .timeout(Duration::from_secs(30))
-        .danger_accept_invalid_certs(true) // for CDN flexibility
+        .danger_accept_invalid_certs(true); // for CDN flexibility
+
+    if let Some((request_host, connect_addr)) = config.http_resolve_override() {
+        info!(
+            "[PHANTOM] HTTP resolve override: {} -> {}",
+            request_host, connect_addr
+        );
+        client_builder = client_builder.resolve(&request_host, connect_addr);
+    }
+
+    let http_client = client_builder
         .build()
         .expect("failed to build HTTP client");
 
     // Authenticate with server
-    info!("[PHANTOM] HTTP authenticating to {}...", config.server_url);
+    let auth_url = config.http_request_url("/api/v1/auth/login");
+    info!(
+        "[PHANTOM] HTTP authenticating: url={} host={} connect_addr={}",
+        auth_url,
+        config.http_host_header().unwrap_or_else(|| "(default)".to_string()),
+        config.connect_addr()
+    );
     set_runtime_state("authenticating");
     let token = loop {
         match http_authenticate(&http_client, &config).await {
@@ -491,8 +578,10 @@ async fn run_http_loop(
             Err(e) => {
                 set_runtime_last_error(e.clone());
                 error!(
-                    "[PHANTOM] ❌ HTTP auth failed: {} | server={} | retrying in 5s...",
-                    e, config.server_url
+                    "[PHANTOM] ❌ HTTP auth failed: {} | url={} | host={} | retrying in 5s...",
+                    e,
+                    auth_url,
+                    config.http_host_header().unwrap_or_else(|| "(default)".to_string())
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -501,7 +590,7 @@ async fn run_http_loop(
 
     info!("HTTP authenticated: {}...", &token[..16]);
 
-    let sync_url = format!("{}/api/v1/lessons/sync", config.server_url);
+    let sync_url = config.http_request_url("/api/v1/lessons/sync");
     let key = config.key;
     let mut _last_data = Instant::now();
     let mut consecutive_empty: u32 = 0;
@@ -544,7 +633,12 @@ async fn run_http_loop(
         };
 
         let sync_started = Instant::now();
-        match http_client.post(&sync_url).json(&req_body).send().await {
+        let mut request = http_client.post(&sync_url);
+        if let Some(host) = config.http_host_header() {
+            request = request.header(HOST, host);
+        }
+
+        match request.json(&req_body).send().await {
             Ok(resp) => {
                 let ping_ms = sync_started.elapsed().as_millis().min(u32::MAX as u128) as u32;
                 set_runtime_ping(ping_ms);
@@ -618,8 +712,14 @@ async fn run_http_loop(
             }
             Err(e) => {
                 set_runtime_state("degraded");
-                set_runtime_last_error(format!("Sync request failed: {}", e));
-                error!("[PHANTOM] ❌ Sync request failed: {} | url={}", e, sync_url);
+                let message = describe_reqwest_error(
+                    &e,
+                    &sync_url,
+                    config.http_host_header().as_deref(),
+                    &config.connect_addr(),
+                );
+                set_runtime_last_error(message.clone());
+                error!("[PHANTOM] ❌ Sync request failed: {}", message);
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 consecutive_empty = 0;
             }
@@ -638,19 +738,42 @@ async fn http_authenticate(
         .as_secs();
     let sig = sign_auth(&config.secret, ts);
 
-    let url = format!("{}/api/v1/auth/login", config.server_url);
+    let url = config.http_request_url("/api/v1/auth/login");
     let body = AuthRequest { ts, sig };
+    let host_header = config.http_host_header();
+    let connect_addr = config.connect_addr();
 
     let started_at = Instant::now();
-    let resp = client
-        .post(&url)
+    let mut request = client.post(&url);
+    if let Some(host) = host_header.as_ref() {
+        request = request.header(HOST, host);
+    }
+
+    let resp = request
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("request failed: {}", e))?;
+        .map_err(|e| describe_reqwest_error(&e, &url, host_header.as_deref(), &connect_addr))?;
 
     if !resp.status().is_success() {
-        return Err(format!("auth failed: status {}", resp.status()));
+        let status = resp.status();
+        let body_preview = resp
+            .text()
+            .await
+            .ok()
+            .map(|body| body.chars().take(180).collect::<String>().replace('\n', " "))
+            .filter(|body| !body.is_empty());
+        let mut message = format!(
+            "auth failed: status {} | url={} | connect_addr={}",
+            status, url, connect_addr
+        );
+        if let Some(host_header) = host_header.as_deref() {
+            message.push_str(&format!(" | host_header={}", host_header));
+        }
+        if let Some(body_preview) = body_preview {
+            message.push_str(&format!(" | body='{}'", body_preview));
+        }
+        return Err(message);
     }
 
     let json: serde_json::Value = resp
@@ -722,4 +845,57 @@ fn random_user_agent() -> &'static str {
     ];
     let idx = std::process::id() as usize % UAS.len();
     UAS[idx]
+}
+
+fn describe_reqwest_error(
+    error: &reqwest::Error,
+    url: &str,
+    host_header: Option<&str>,
+    connect_addr: &str,
+) -> String {
+    let mut details = vec![
+        format!("request failed: {}", error),
+        format!("url={}", url),
+        format!("connect_addr={}", connect_addr),
+    ];
+
+    if let Some(host_header) = host_header {
+        details.push(format!("host_header={}", host_header));
+    }
+
+    let mut kinds = Vec::new();
+    if error.is_timeout() {
+        kinds.push("timeout");
+    }
+    if error.is_connect() {
+        kinds.push("connect");
+    }
+    if error.is_request() {
+        kinds.push("request");
+    }
+    if error.is_body() {
+        kinds.push("body");
+    }
+    if error.is_decode() {
+        kinds.push("decode");
+    }
+    if !kinds.is_empty() {
+        details.push(format!("kind={}", kinds.join(",")));
+    }
+
+    if let Some(status) = error.status() {
+        details.push(format!("status={}", status));
+    }
+
+    let mut causes = Vec::new();
+    let mut source = error.source();
+    while let Some(current) = source {
+        causes.push(current.to_string());
+        source = current.source();
+    }
+    if !causes.is_empty() {
+        details.push(format!("causes={}", causes.join(" <- ")));
+    }
+
+    details.join(" | ")
 }

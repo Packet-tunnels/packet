@@ -71,11 +71,6 @@ impl FragmentStream {
             fragment_size: 0,
         }
     }
-
-    /// Consume the wrapper and return the inner TcpStream.
-    pub fn into_inner(self) -> TcpStream {
-        self.inner
-    }
 }
 
 impl AsyncWrite for FragmentStream {

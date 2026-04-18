@@ -22,6 +22,11 @@ class PacketBridge {
         fun copyStatsJson(): String? = PhantomTunnel.copyStatsJson()
 
         @JvmStatic
+        fun stopClient() {
+            PhantomTunnel.stopClient()
+        }
+
+        @JvmStatic
         fun startClient(serverUrl: String, secret: String, listenPort: Int): Int =
             PhantomTunnel.startClient(serverUrl, secret, listenPort)
 

@@ -487,6 +487,22 @@
                         android:textSize="10sp" />
 
                     <Button
+                        android:id="@+id/autoScannerButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="40dp"
+                        android:layout_marginStart="8dp"
+                        android:background="@drawable/bg_secondary_button"
+                        android:elevation="0dp"
+                        android:minWidth="0dp"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:stateListAnimator="@null"
+                        android:text="Scanner"
+                        android:textAllCaps="false"
+                        android:textColor="#2563EB"
+                        android:textSize="11sp" />
+
+                    <Button
                         android:id="@+id/toggleLogsButton"
                         android:layout_width="wrap_content"
                         android:layout_height="40dp"
@@ -497,7 +513,7 @@
                         android:paddingStart="16dp"
                         android:paddingEnd="16dp"
                         android:stateListAnimator="@null"
-                        android:text="Show"
+                        android:text="Show Logs"
                         android:textAllCaps="false"
                         android:textColor="#2563EB"
                         android:textSize="11sp" />

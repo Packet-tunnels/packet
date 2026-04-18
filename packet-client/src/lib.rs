@@ -26,7 +26,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tracing::{error, info, warn};
 use url::Url;
 
@@ -169,6 +169,12 @@ pub fn runtime_stats_json() -> Option<String> {
     serde_json::to_string(&snapshot).ok()
 }
 
+pub fn clear_runtime_stats() {
+    if let Ok(mut snapshot) = RUNTIME_STATS.lock() {
+        *snapshot = RuntimeStatsSnapshot::default();
+    }
+}
+
 pub fn set_runtime_state(state: &str) {
     if let Ok(mut snapshot) = RUNTIME_STATS.lock() {
         snapshot.state = state.to_string();
@@ -309,7 +315,11 @@ pub fn bind_socks_listener(listen_addr: &str) -> Result<std::net::TcpListener, S
 }
 
 /// Start the client with a pre-bound listener (called from FFI).
-pub async fn start_client_with_listener(config: ClientConfig, std_listener: std::net::TcpListener) {
+pub async fn start_client_with_listener(
+    config: ClientConfig,
+    std_listener: std::net::TcpListener,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     reset_runtime_stats(&config);
 
     let key = derive_key(&config.secret);
@@ -368,7 +378,6 @@ pub async fn start_client_with_listener(config: ClientConfig, std_listener: std:
         sni_override: config.sni_override.clone(),
         fragment_enabled: config.fragment,
         fragment_size: config.fragment_size,
-        padding_enabled: config.padding,
     };
 
     // Spawn the transport loop (WebSocket, HTTP, or Auto)
@@ -383,26 +392,50 @@ pub async fn start_client_with_listener(config: ClientConfig, std_listener: std:
     let next_stream_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
 
     loop {
-        let (socket, peer) = listener.accept().await.unwrap();
-        info!("SOCKS5 connection from {}", peer);
+        tokio::select! {
+            accept_result = listener.accept() => {
+                let (socket, peer) = match accept_result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        error!("[PHANTOM] ❌ SOCKS5 accept failed: {}", error);
+                        break;
+                    }
+                };
+                info!("SOCKS5 connection from {}", peer);
 
-        let stream_id = next_stream_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let tx = upstream_tx.clone();
-        let state = tunnel_state.clone();
+                let stream_id = next_stream_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let tx = upstream_tx.clone();
+                let state = tunnel_state.clone();
 
-        tokio::spawn(async move {
-            if let Err(e) = handle_socks5(socket, stream_id, tx, state).await {
-                warn!("[PHANTOM] SOCKS5 stream {} error: {}", stream_id, e);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_socks5(socket, stream_id, tx, state).await {
+                        warn!("[PHANTOM] SOCKS5 stream {} error: {}", stream_id, e);
+                    }
+                });
             }
-        });
+            changed = shutdown_rx.changed() => {
+                match changed {
+                    Ok(()) => {
+                        if *shutdown_rx.borrow() {
+                            info!("[PHANTOM] Shutdown requested for local client");
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
     }
+
+    info!("[PHANTOM] Client listener stopped");
 }
 
 /// Start the client with full configuration (binds port internally — for CLI use).
 pub async fn start_client_with_config(config: ClientConfig) {
     match bind_socks_listener(&config.listen) {
         Ok(listener) => {
-            start_client_with_listener(config, listener).await;
+            let (_shutdown_tx, shutdown_rx) = watch::channel(false);
+            start_client_with_listener(config, listener, shutdown_rx).await;
         }
         Err(e) => {
             error!("[PHANTOM] ❌ {}", e);

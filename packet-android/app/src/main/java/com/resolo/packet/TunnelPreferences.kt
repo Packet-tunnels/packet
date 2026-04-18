@@ -2,8 +2,14 @@ package com.resolo.packet
 
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 
 object TunnelEvents {
+    private const val LOG_BROADCAST_DEBOUNCE_MS = 120L
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var pendingLogBroadcast: Runnable? = null
+
     fun broadcastState(context: Context, stateName: String, message: String) {
         val intent = Intent(TunnelActions.ACTION_STATE_UPDATED)
             .setPackage(context.packageName)
@@ -13,7 +19,19 @@ object TunnelEvents {
     }
 
     fun broadcastLog(context: Context) {
-        context.sendBroadcast(Intent(TunnelActions.ACTION_LOG_UPDATED).setPackage(context.packageName))
+        val appContext = context.applicationContext
+        val runnable = synchronized(this) {
+            pendingLogBroadcast?.let { return }
+
+            Runnable {
+                synchronized(this) {
+                    pendingLogBroadcast = null
+                }
+                appContext.sendBroadcast(Intent(TunnelActions.ACTION_LOG_UPDATED).setPackage(appContext.packageName))
+            }.also { pendingLogBroadcast = it }
+        }
+
+        mainHandler.postDelayed(runnable, LOG_BROADCAST_DEBOUNCE_MS)
     }
 
     fun broadcastDashboard(context: Context, runtimeJson: String?, diagJson: String?) {
