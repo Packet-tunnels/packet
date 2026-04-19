@@ -56,7 +56,9 @@ class PacketBridge {
             cdnEdge: String,
             hostOverride: String,
             sniOverride: String,
-            transportMode: Int
+            transportMode: Int,
+            fragmentEnabled: Boolean,
+            fragmentSize: Int,
         ): Int =
             PhantomTunnel.startClientFull(
                 serverUrl,
@@ -66,6 +68,8 @@ class PacketBridge {
                 hostOverride,
                 sniOverride,
                 transportMode,
+                fragmentEnabled,
+                fragmentSize,
             )
 
         @JvmStatic

@@ -19,10 +19,11 @@
             android:orientation="horizontal">
 
             <TextView
+                android:id="@+id/settingsDialogTitle"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Settings"
+                android:text="New Server"
                 android:textColor="#111827"
                 android:textSize="18sp"
                 android:textStyle="bold" />
@@ -33,10 +34,8 @@
                 android:layout_height="32dp"
                 android:background="@android:color/transparent"
                 android:contentDescription="Close settings"
-                android:elevation="0dp"
                 android:padding="4dp"
                 android:src="@drawable/ic_close"
-                android:stateListAnimator="@null"
                 android:tint="#111827" />
         </LinearLayout>
 
@@ -45,14 +44,40 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:textColor="#B42318"
-            android:textSize="11sp"
+            android:background="@drawable/bg_outline_panel"
+            android:padding="12dp"
+            android:textColor="#B91C1C"
+            android:textSize="12sp"
+            android:textStyle="bold"
             android:visibility="gone" />
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="20dp"
+            android:text="CONFIG NAME"
+            android:textColor="#6B7280"
+            android:textSize="9sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/settingsConfigNameInput"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_outline_field"
+            android:hint="New Server"
+            android:inputType="textCapWords"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:textColor="#111827"
+            android:textColorHint="#9CA3AF"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
             android:text="SERVER URL"
             android:textColor="#6B7280"
             android:textSize="9sp"
@@ -63,7 +88,7 @@
             android:layout_width="match_parent"
             android:layout_height="46dp"
             android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
+            android:background="@drawable/bg_outline_field"
             android:hint="https://example.com"
             android:inputType="textUri"
             android:paddingStart="14dp"
@@ -93,7 +118,7 @@
                 android:layout_width="0dp"
                 android:layout_height="46dp"
                 android:layout_weight="1"
-                android:background="@drawable/bg_field"
+                android:background="@drawable/bg_outline_field"
                 android:hint="Enter shared secret"
                 android:inputType="textPassword"
                 android:paddingStart="14dp"
@@ -107,102 +132,140 @@
                 android:layout_width="46dp"
                 android:layout_height="46dp"
                 android:layout_marginStart="10dp"
-                android:background="@drawable/bg_icon_button"
+                android:background="@drawable/bg_outline_icon_button"
                 android:contentDescription="Toggle secret visibility"
-                android:elevation="0dp"
                 android:padding="12dp"
                 android:src="@drawable/ic_visibility"
-                android:stateListAnimator="@null"
                 android:tint="#4B5563" />
         </LinearLayout>
 
-        <TextView
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="LISTEN PORT"
-            android:textColor="#6B7280"
-            android:textSize="9sp"
-            android:textStyle="bold" />
+            android:orientation="horizontal">
 
-        <EditText
-            android:id="@+id/settingsListenPortInput"
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="LISTEN PORT"
+                    android:textColor="#6B7280"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/settingsListenPortInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_outline_field"
+                    android:hint="Auto"
+                    android:inputType="number"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:textColor="#111827"
+                    android:textColorHint="#9CA3AF"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="TRANSPORT"
+                    android:textColor="#6B7280"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
+
+                <Spinner
+                    android:id="@+id/settingsTransportSpinner"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_outline_field"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:spinnerMode="dropdown" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
-            android:hint="Auto"
-            android:inputType="number"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:textColor="#111827"
-            android:textColorHint="#9CA3AF"
-            android:textSize="13sp" />
-
-        <TextView
-            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="TRANSPORT"
-            android:textColor="#6B7280"
-            android:textSize="9sp"
-            android:textStyle="bold" />
+            android:orientation="horizontal">
 
-        <Spinner
-            android:id="@+id/settingsTransportSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:spinnerMode="dropdown" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="CDN EDGE"
-            android:textColor="#6B7280"
-            android:textSize="9sp"
-            android:textStyle="bold" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CDN EDGE"
+                    android:textColor="#6B7280"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
 
-        <EditText
-            android:id="@+id/settingsCdnEdgeInput"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
-            android:hint="185.143.234.235:80"
-            android:inputType="text"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:textColor="#111827"
-            android:textColorHint="#9CA3AF"
-            android:textSize="13sp" />
+                <EditText
+                    android:id="@+id/settingsCdnEdgeInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_outline_field"
+                    android:hint="185.143.234.235:80"
+                    android:inputType="text"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:textColor="#111827"
+                    android:textColorHint="#9CA3AF"
+                    android:textSize="13sp" />
+            </LinearLayout>
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="HOST OVERRIDE"
-            android:textColor="#6B7280"
-            android:textSize="9sp"
-            android:textStyle="bold" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-        <EditText
-            android:id="@+id/settingsHostOverrideInput"
-            android:layout_width="match_parent"
-            android:layout_height="46dp"
-            android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
-            android:hint="your-domain.com"
-            android:inputType="text"
-            android:paddingStart="14dp"
-            android:paddingEnd="14dp"
-            android:textColor="#111827"
-            android:textColorHint="#9CA3AF"
-            android:textSize="13sp" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="HOST OVERRIDE"
+                    android:textColor="#6B7280"
+                    android:textSize="9sp"
+                    android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/settingsHostOverrideInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="46dp"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_outline_field"
+                    android:hint="your-domain.com"
+                    android:inputType="text"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="14dp"
+                    android:textColor="#111827"
+                    android:textColorHint="#9CA3AF"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
 
         <TextView
             android:layout_width="wrap_content"
@@ -218,13 +281,79 @@
             android:layout_width="match_parent"
             android:layout_height="46dp"
             android:layout_marginTop="8dp"
-            android:background="@drawable/bg_field"
+            android:background="@drawable/bg_outline_field"
             android:hint="allowed-site.ir"
             android:inputType="text"
             android:paddingStart="14dp"
             android:paddingEnd="14dp"
             android:textColor="#111827"
             android:textColorHint="#9CA3AF"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="ADVANCED (DPI BYPASS)"
+            android:textColor="#6B7280"
+            android:textSize="9sp"
+            android:textStyle="bold" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Switch
+                android:id="@+id/settingsFragmentSwitch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="TLS Fragmentation"
+                android:textColor="#111827"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CHUNK SIZE"
+                    android:textColor="#6B7280"
+                    android:textSize="8sp"
+                    android:textStyle="bold" />
+
+                <EditText
+                    android:id="@+id/settingsFragmentSizeInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:layout_marginTop="4dp"
+                    android:background="@drawable/bg_outline_field"
+                    android:hint="40"
+                    android:inputType="number"
+                    android:paddingStart="10dp"
+                    android:paddingEnd="10dp"
+                    android:textColor="#111827"
+                    android:textColorHint="#9CA3AF"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/settingsStorageNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_outline_panel"
+            android:padding="14dp"
+            android:text="Stored locally. Configuration details stay on this device and are written into the Android VPN flow when you connect."
+            android:textColor="#6B7280"
             android:textSize="13sp" />
 
         <LinearLayout
@@ -238,12 +367,10 @@
                 android:layout_width="0dp"
                 android:layout_height="46dp"
                 android:layout_weight="1"
-                android:background="@drawable/bg_secondary_button"
-                android:elevation="0dp"
-                android:stateListAnimator="@null"
+                android:background="@drawable/bg_outline_button"
                 android:text="Cancel"
                 android:textAllCaps="false"
-                android:textColor="#2563EB"
+                android:textColor="#111827"
                 android:textSize="13sp"
                 android:textStyle="bold" />
 
@@ -254,14 +381,11 @@
                 android:layout_marginStart="12dp"
                 android:layout_weight="1"
                 android:background="@drawable/bg_primary_button"
-                android:elevation="0dp"
-                android:stateListAnimator="@null"
                 android:text="Save"
                 android:textAllCaps="false"
                 android:textColor="#FFFFFF"
                 android:textSize="13sp"
                 android:textStyle="bold" />
         </LinearLayout>
-
     </LinearLayout>
 </ScrollView>

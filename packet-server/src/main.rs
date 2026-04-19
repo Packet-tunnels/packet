@@ -22,13 +22,14 @@ use axum::{
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{error, info, warn};
 
@@ -57,6 +58,7 @@ struct AppState {
     key: [u8; 32],
     max_drift: u64,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    recent_auth_nonces: Mutex<HashMap<String, u64>>,
     /// Active relay nodes (Starlink exit nodes)
     relay_nodes: Mutex<Vec<Arc<RelayNode>>>,
 }
@@ -66,10 +68,29 @@ impl AppState {
     async fn get_relay(&self) -> Option<Arc<RelayNode>> {
         let relays = self.relay_nodes.lock().await;
         // Pick the relay with fewest active streams (simple load balancing)
-        relays.iter()
+        relays
+            .iter()
             .filter(|r| r.is_alive())
             .min_by_key(|r| r.active_streams.load(std::sync::atomic::Ordering::Relaxed))
             .cloned()
+    }
+
+    async fn register_auth_nonce(&self, nonce: &str) -> bool {
+        if nonce.is_empty() {
+            return false;
+        }
+
+        let now = unix_now_secs();
+        let ttl = self.max_drift.saturating_add(30);
+        let mut nonces = self.recent_auth_nonces.lock().await;
+        nonces.retain(|_, seen_at| now.saturating_sub(*seen_at) <= ttl);
+
+        if nonces.contains_key(nonce) {
+            return false;
+        }
+
+        nonces.insert(nonce.to_string(), now);
+        true
     }
 }
 
@@ -92,7 +113,8 @@ impl Session {
     }
 
     fn touch(&self) {
-        self.last_seen_unix.store(unix_now_secs(), Ordering::Relaxed);
+        self.last_seen_unix
+            .store(unix_now_secs(), Ordering::Relaxed);
     }
 
     fn is_recently_active(&self, now: u64, max_idle_secs: u64) -> bool {
@@ -145,7 +167,8 @@ impl RelayNode {
     }
 
     fn mark_dead(&self) {
-        self.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -170,6 +193,7 @@ async fn main() {
         key,
         max_drift: cli.max_drift,
         sessions: Mutex::new(HashMap::new()),
+        recent_auth_nonces: Mutex::new(HashMap::new()),
         relay_nodes: Mutex::new(Vec::new()),
     });
 
@@ -183,15 +207,20 @@ async fn main() {
             // WebSocket sessions keep extra Arc references while open. HTTP polling
             // sessions do not, so retain recently active sessions by idle TTL too.
             sessions.retain(|_token, session| {
-                Arc::strong_count(session) > 1 || session.is_recently_active(now, SESSION_IDLE_TTL_SECS)
+                Arc::strong_count(session) > 1
+                    || session.is_recently_active(now, SESSION_IDLE_TTL_SECS)
             });
             // Clean dead relay nodes
             let mut relays = cleanup_state.relay_nodes.lock().await;
             relays.retain(|r| r.is_alive());
+            let mut auth_nonces = cleanup_state.recent_auth_nonces.lock().await;
+            let nonce_ttl = cleanup_state.max_drift.saturating_add(30);
+            auth_nonces.retain(|_, seen_at| now.saturating_sub(*seen_at) <= nonce_ttl);
             info!(
-                "Cleanup: {} active sessions, {} relay nodes",
+                "Cleanup: {} active sessions, {} relay nodes, {} auth nonces",
                 sessions.len(),
-                relays.len()
+                relays.len(),
+                auth_nonces.len(),
             );
         }
     });
@@ -225,7 +254,8 @@ async fn serve_homepage() -> Html<&'static str> {
 }
 
 async fn serve_about() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
+    Html(
+        r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>About - Piano Lessons Online</title>
 <style>body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333;line-height:1.8}
 h1{color:#2c3e50}a{color:#3498db}</style></head>
@@ -233,24 +263,31 @@ h1{color:#2c3e50}a{color:#3498db}</style></head>
 <p>We offer comprehensive online piano lessons for all skill levels. Our certified instructors
 bring decades of experience to help you master the piano from the comfort of your home.</p>
 <p>Founded in 2024, we have helped over 500 students achieve their musical goals.</p>
-<p><a href="/">← Back to Home</a></p></body></html>"#)
+<p><a href="/">← Back to Home</a></p></body></html>"#,
+    )
 }
 
 async fn serve_contact() -> Html<&'static str> {
-    Html(r#"<!DOCTYPE html>
+    Html(
+        r#"<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>Contact - Piano Lessons Online</title>
 <style>body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333;line-height:1.8}
 h1{color:#2c3e50}a{color:#3498db}</style></head>
 <body><h1>Contact Us</h1>
 <p>Email: info@piano-lessons.site</p>
 <p>We typically respond within 24 hours.</p>
-<p><a href="/">← Back to Home</a></p></body></html>"#)
+<p><a href="/">← Back to Home</a></p></body></html>"#,
+    )
 }
 
-async fn health_check(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
-    let relay_count = state.relay_nodes.lock().await.iter().filter(|r| r.is_alive()).count();
+async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let relay_count = state
+        .relay_nodes
+        .lock()
+        .await
+        .iter()
+        .filter(|r| r.is_alive())
+        .count();
     Json(serde_json::json!({
         "status": "ok",
         "service": "piano-lessons-api",
@@ -270,7 +307,11 @@ async fn handle_auth(
         .as_secs();
 
     // Check timestamp drift
-    let drift = if req.ts > now { req.ts - now } else { now - req.ts };
+    let drift = if req.ts > now {
+        req.ts - now
+    } else {
+        now - req.ts
+    };
     if drift > state.max_drift {
         warn!("Auth rejected: timestamp drift {}s", drift);
         return (
@@ -280,8 +321,16 @@ async fn handle_auth(
     }
 
     // Verify HMAC signature
-    if !verify_auth(&state.secret, req.ts, &req.sig) {
+    if !verify_auth(&state.secret, req.ts, &req.n, &req.sig) {
         warn!("Auth rejected: bad signature");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid credentials"})),
+        );
+    }
+
+    if !state.register_auth_nonce(&req.n).await {
+        warn!("Auth rejected: replayed nonce");
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid credentials"})),
@@ -292,11 +341,7 @@ async fn handle_auth(
     let token = generate_session_token();
     let session = Arc::new(Session::new());
 
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(token.clone(), session);
+    state.sessions.lock().await.insert(token.clone(), session);
 
     info!("New session created: {}...", &token[..16]);
 
@@ -328,12 +373,7 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
     info!("[RELAY] New relay connection, waiting for auth...");
 
     // ── Step 1: Authenticate ──
-    let auth_msg = match tokio::time::timeout(
-        Duration::from_secs(10),
-        ws_receiver.next(),
-    )
-    .await
-    {
+    let auth_msg = match tokio::time::timeout(Duration::from_secs(10), ws_receiver.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
         _ => {
             warn!("[RELAY] Auth failed: no valid message received");
@@ -344,21 +384,37 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
     let auth_json: serde_json::Value = match serde_json::from_str(&auth_msg) {
         Ok(v) => v,
         Err(_) => {
-            let _ = ws_sender.send(Message::Text(r#"{"error":"invalid request"}"#.into())).await;
+            let _ = ws_sender
+                .send(Message::Text(r#"{"error":"invalid request"}"#.into()))
+                .await;
             return;
         }
     };
 
     // Check auth credentials
     let ts = auth_json["ts"].as_u64().unwrap_or(0);
+    let nonce = auth_json["n"].as_str().unwrap_or("");
     let sig = auth_json["sig"].as_str().unwrap_or("");
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let drift = if ts > now { ts - now } else { now - ts };
 
-    if drift > state.max_drift || !verify_auth(&state.secret, ts, sig) {
+    if drift > state.max_drift || !verify_auth(&state.secret, ts, nonce, sig) {
         warn!("[RELAY] Auth rejected");
-        let _ = ws_sender.send(Message::Text(r#"{"error":"unauthorized"}"#.into())).await;
+        let _ = ws_sender
+            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
+            .await;
+        return;
+    }
+
+    if !state.register_auth_nonce(nonce).await {
+        warn!("[RELAY] Auth rejected: replayed nonce");
+        let _ = ws_sender
+            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
+            .await;
         return;
     }
 
@@ -366,7 +422,9 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
     let mode = auth_json["mode"].as_str().unwrap_or("");
     if mode != "relay" {
         warn!("[RELAY] Not a relay auth (mode='{}')", mode);
-        let _ = ws_sender.send(Message::Text(r#"{"error":"invalid mode"}"#.into())).await;
+        let _ = ws_sender
+            .send(Message::Text(r#"{"error":"invalid mode"}"#.into()))
+            .await;
         return;
     }
 
@@ -374,11 +432,17 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
 
     // Accept the relay
     let relay_id = generate_session_token();
-    let _ = ws_sender.send(Message::Text(
-        serde_json::json!({"relay_id": &relay_id, "status": "accepted"}).to_string()
-    )).await;
+    let _ = ws_sender
+        .send(Message::Text(
+            serde_json::json!({"relay_id": &relay_id, "status": "accepted"}).to_string(),
+        ))
+        .await;
 
-    info!("[RELAY] ✓ Relay node '{}' authenticated: {}...", relay_label, &relay_id[..16]);
+    info!(
+        "[RELAY] ✓ Relay node '{}' authenticated: {}...",
+        relay_label,
+        &relay_id[..16]
+    );
 
     let key = state.key;
 
@@ -419,7 +483,9 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
             // Drain queued frames
             while let Ok(f) = relay_rx.try_recv() {
                 frames.push(f);
-                if frames.len() >= 256 { break; }
+                if frames.len() >= 256 {
+                    break;
+                }
             }
 
             if !frames.is_empty() {
@@ -450,7 +516,8 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
                                             frame,
                                             &receiver_relay,
                                             &receiver_state,
-                                        ).await;
+                                        )
+                                        .await;
                                     }
                                 }
                                 Err(e) => error!("[RELAY] Frame decode error: {}", e),
@@ -482,17 +549,17 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
     relay_node.mark_dead();
     let mut relays = state.relay_nodes.lock().await;
     relays.retain(|r| r.is_alive());
-    info!("[RELAY] Relay '{}' removed. {} nodes remaining.", relay_label, relays.len());
+    info!(
+        "[RELAY] Relay '{}' removed. {} nodes remaining.",
+        relay_label,
+        relays.len()
+    );
 }
 
 /// Route a frame received FROM the relay back to the client session that requested it.
 /// The relay sends ConnectOk/ConnectErr/Data/Close frames with stream_ids that map
 /// to the original client session's stream_ids.
-async fn relay_dispatch_to_client(
-    frame: Frame,
-    relay: &Arc<RelayNode>,
-    _state: &Arc<AppState>,
-) {
+async fn relay_dispatch_to_client(frame: Frame, relay: &Arc<RelayNode>, _state: &Arc<AppState>) {
     let stream_id = frame.stream_id;
     let pending = relay.pending_connects.lock().await;
     if let Some(session_tx) = pending.get(&stream_id) {
@@ -500,17 +567,16 @@ async fn relay_dispatch_to_client(
             // Session is dead, clean up
             drop(pending);
             relay.pending_connects.lock().await.remove(&stream_id);
-            relay.active_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            relay
+                .active_streams
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 // ─── WebSocket Tunnel ──────────────────────────────────────────
 
-async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_websocket(socket, state))
 }
 
@@ -519,12 +585,7 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
     info!("[PHANTOM] WS: new connection, waiting for auth...");
 
     // ── Step 1: Authenticate via first message ──
-    let auth_msg = match tokio::time::timeout(
-        Duration::from_secs(10),
-        ws_receiver.next(),
-    )
-    .await
-    {
+    let auth_msg = match tokio::time::timeout(Duration::from_secs(10), ws_receiver.next()).await {
         Ok(Some(Ok(Message::Text(text)))) => text,
         Ok(Some(Ok(other))) => {
             warn!("[PHANTOM] WS auth: expected Text, got {:?}", other);
@@ -547,7 +608,11 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
     let auth: AuthRequest = match serde_json::from_str(&auth_msg) {
         Ok(a) => a,
         Err(e) => {
-            warn!("[PHANTOM] WS auth: invalid JSON: {} — raw: '{}'", e, &auth_msg[..auth_msg.len().min(100)]);
+            warn!(
+                "[PHANTOM] WS auth: invalid JSON: {} — raw: '{}'",
+                e,
+                &auth_msg[..auth_msg.len().min(100)]
+            );
             let _ = ws_sender
                 .send(Message::Text(r#"{"error":"invalid request"}"#.into()))
                 .await;
@@ -566,15 +631,26 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
     };
 
     if drift > state.max_drift {
-        warn!("[PHANTOM] WS auth rejected: drift {}s (max {}s) — client clock out of sync", drift, state.max_drift);
+        warn!(
+            "[PHANTOM] WS auth rejected: drift {}s (max {}s) — client clock out of sync",
+            drift, state.max_drift
+        );
         let _ = ws_sender
             .send(Message::Text(r#"{"error":"clock drift too high"}"#.into()))
             .await;
         return;
     }
 
-    if !verify_auth(&state.secret, auth.ts, &auth.sig) {
+    if !verify_auth(&state.secret, auth.ts, &auth.n, &auth.sig) {
         warn!("[PHANTOM] WS auth rejected: bad HMAC signature — wrong secret");
+        let _ = ws_sender
+            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
+            .await;
+        return;
+    }
+
+    if !state.register_auth_nonce(&auth.n).await {
+        warn!("[PHANTOM] WS auth rejected: replayed nonce");
         let _ = ws_sender
             .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
             .await;
@@ -599,7 +675,11 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
         ))
         .await;
 
-    info!("[PHANTOM] ✓ WS session established: {}... (relay: {})", &token[..16], has_relay);
+    info!(
+        "[PHANTOM] ✓ WS session established: {}... (relay: {})",
+        &token[..16],
+        has_relay
+    );
 
     let key = state.key;
 
@@ -629,7 +709,9 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
 
             while let Ok(f) = rx.try_recv() {
                 frames.push(f);
-                if frames.len() >= 256 { break; }
+                if frames.len() >= 256 {
+                    break;
+                }
             }
 
             if !frames.is_empty() {
@@ -648,25 +730,24 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
     let receiver_task = tokio::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
-                Ok(Message::Binary(data)) => {
-                    match decrypt(&key, &data) {
-                        Ok(plaintext) => {
-                            match decode_frames(&plaintext) {
-                                Ok(frames) => {
-                                    for frame in frames {
-                                        process_upstream_frame_with_relay(
-                                            frame,
-                                            &session_rx,
-                                            &rx_state,
-                                        ).await;
-                                    }
-                                }
-                                Err(e) => error!("[PHANTOM] Frame decode error: {} ({}B)", e, plaintext.len()),
+                Ok(Message::Binary(data)) => match decrypt(&key, &data) {
+                    Ok(plaintext) => match decode_frames(&plaintext) {
+                        Ok(frames) => {
+                            for frame in frames {
+                                process_upstream_frame_with_relay(frame, &session_rx, &rx_state)
+                                    .await;
                             }
                         }
-                        Err(e) => error!("[PHANTOM] Decrypt error from client: {} ({}B — key mismatch?)", e, data.len()),
-                    }
-                }
+                        Err(e) => {
+                            error!("[PHANTOM] Frame decode error: {} ({}B)", e, plaintext.len())
+                        }
+                    },
+                    Err(e) => error!(
+                        "[PHANTOM] Decrypt error from client: {} ({}B — key mismatch?)",
+                        e,
+                        data.len()
+                    ),
+                },
                 Ok(Message::Ping(_)) => {}
                 Ok(Message::Close(reason)) => {
                     info!("[PHANTOM] WS closed by client: {:?}", reason);
@@ -707,16 +788,45 @@ async fn process_upstream_frame_with_relay(
             let addr = String::from_utf8_lossy(&frame.data).to_string();
             let stream_id = frame.stream_id;
 
+            if let Err(reason) = validate_outbound_target(&addr).await {
+                warn!(
+                    "[PHANTOM] Stream {} blocked outbound target {}: {}",
+                    stream_id, addr, reason
+                );
+                let _ = session
+                    .downstream_tx
+                    .send(Frame::connect_err(
+                        stream_id,
+                        "destination blocked by server policy",
+                    ))
+                    .await;
+                return;
+            }
+
             if let Some(relay) = relay {
                 // ── Route through relay (Starlink exit) ──
-                info!("[RELAY-ROUTE] Stream {} → relay '{}' → {}", stream_id, relay.label, addr);
+                info!(
+                    "[RELAY-ROUTE] Stream {} → relay '{}' → {}",
+                    stream_id, relay.label, addr
+                );
 
                 // Register this stream's session downstream_tx so relay responses come back
-                relay.pending_connects.lock().await.insert(stream_id, session.downstream_tx.clone());
-                relay.active_streams.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                relay
+                    .pending_connects
+                    .lock()
+                    .await
+                    .insert(stream_id, session.downstream_tx.clone());
+                relay
+                    .active_streams
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Forward the Connect frame to the relay
-                if relay.tx.send(Frame::connect(stream_id, &addr)).await.is_err() {
+                if relay
+                    .tx
+                    .send(Frame::connect(stream_id, &addr))
+                    .await
+                    .is_err()
+                {
                     error!("[RELAY-ROUTE] Failed to send to relay, falling back to direct");
                     relay.mark_dead();
                     // Fallback: direct connection
@@ -760,7 +870,9 @@ async fn process_upstream_frame_with_relay(
             if let Some(relay) = relay {
                 let mut pending = relay.pending_connects.lock().await;
                 if pending.remove(&frame.stream_id).is_some() {
-                    relay.active_streams.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    relay
+                        .active_streams
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                     drop(pending);
                     let _ = relay.tx.send(frame).await;
                     return;
@@ -788,11 +900,7 @@ async fn process_upstream_frame_direct(frame: Frame, session: &Arc<Session>) {
                 match TcpStream::connect(&addr).await {
                     Ok(tcp) => {
                         let (mut read_half, write_half) = tcp.into_split();
-                        session
-                            .writers
-                            .lock()
-                            .await
-                            .insert(stream_id, write_half);
+                        session.writers.lock().await.insert(stream_id, write_half);
 
                         let _ = tx.send(Frame::connect_ok(stream_id)).await;
                         info!("[DIRECT] Stream {} connected to {}", stream_id, addr);
@@ -822,9 +930,7 @@ async fn process_upstream_frame_direct(frame: Frame, session: &Arc<Session>) {
                     }
                     Err(e) => {
                         error!("[DIRECT] Stream {} connect failed: {}", stream_id, e);
-                        let _ = tx
-                            .send(Frame::connect_err(stream_id, &e.to_string()))
-                            .await;
+                        let _ = tx.send(Frame::connect_err(stream_id, &e.to_string())).await;
                     }
                 }
             });
@@ -901,4 +1007,118 @@ async fn handle_sync(
     let encoded = b64_encode(&encrypted);
 
     (StatusCode::OK, Json(serde_json::json!({"d": encoded})))
+}
+
+async fn validate_outbound_target(addr: &str) -> Result<(), String> {
+    let (host, port) = split_target_host_port(addr)?;
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return validate_public_ip(ip);
+    }
+
+    let resolved = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio::net::lookup_host((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| format!("DNS lookup timed out for {}", host))?
+    .map_err(|e| format!("DNS lookup failed for {}: {}", host, e))?;
+
+    let mut saw_address = false;
+    for socket_addr in resolved {
+        saw_address = true;
+        validate_public_ip(socket_addr.ip())?;
+    }
+
+    if !saw_address {
+        return Err(format!("{} resolved to no usable addresses", host));
+    }
+
+    Ok(())
+}
+
+fn split_target_host_port(addr: &str) -> Result<(String, u16), String> {
+    if let Ok(socket_addr) = addr.parse::<SocketAddr>() {
+        return Ok((socket_addr.ip().to_string(), socket_addr.port()));
+    }
+
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| format!("missing port in {}", addr))?;
+    let host = host.trim().trim_start_matches('[').trim_end_matches(']');
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port in {}", addr))?;
+
+    if host.is_empty() {
+        return Err(format!("missing host in {}", addr));
+    }
+
+    Ok((host.to_string(), port))
+}
+
+fn validate_public_ip(ip: IpAddr) -> Result<(), String> {
+    if let Some(reason) = blocked_ip_reason(ip) {
+        return Err(format!("{} is {}", ip, reason));
+    }
+
+    Ok(())
+}
+
+fn blocked_ip_reason(ip: IpAddr) -> Option<&'static str> {
+    match ip {
+        IpAddr::V4(ipv4) => blocked_ipv4_reason(ipv4),
+        IpAddr::V6(ipv6) => blocked_ipv6_reason(ipv6),
+    }
+}
+
+fn blocked_ipv4_reason(ip: Ipv4Addr) -> Option<&'static str> {
+    let octets = ip.octets();
+
+    if ip.is_private() {
+        Some("private")
+    } else if ip.is_loopback() {
+        Some("loopback")
+    } else if ip.is_link_local() {
+        Some("link-local")
+    } else if ip.is_multicast() {
+        Some("multicast")
+    } else if ip.is_broadcast() {
+        Some("broadcast")
+    } else if ip.is_documentation() {
+        Some("documentation-only")
+    } else if ip.is_unspecified() {
+        Some("unspecified")
+    } else if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
+        Some("carrier-grade NAT")
+    } else if octets[0] == 198 && matches!(octets[1], 18 | 19) {
+        Some("benchmarking-only")
+    } else if octets[0] >= 240 {
+        Some("reserved")
+    } else {
+        None
+    }
+}
+
+fn blocked_ipv6_reason(ip: Ipv6Addr) -> Option<&'static str> {
+    let segments = ip.segments();
+    let first = segments[0];
+
+    if ip.is_loopback() {
+        Some("loopback")
+    } else if ip.is_unspecified() {
+        Some("unspecified")
+    } else if ip.is_multicast() {
+        Some("multicast")
+    } else if (first & 0xfe00) == 0xfc00 {
+        Some("unique-local")
+    } else if (first & 0xffc0) == 0xfe80 {
+        Some("link-local")
+    } else if (first & 0xffc0) == 0xfec0 {
+        Some("site-local")
+    } else if first == 0x2001 && segments[1] == 0x0db8 {
+        Some("documentation-only")
+    } else {
+        None
+    }
 }

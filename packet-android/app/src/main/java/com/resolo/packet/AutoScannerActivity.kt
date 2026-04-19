@@ -152,7 +152,9 @@ class AutoScannerActivity : Activity() {
             cdnEdge = baseConfiguration!!.normalizedCdnEdge,
             hostOverride = baseConfiguration!!.normalizedHostOverride,
             sniOverride = baseConfiguration!!.normalizedSniOverride,
-            transportMode = baseConfiguration!!.transportMode
+            transportMode = baseConfiguration!!.transportMode,
+            fragmentEnabled = baseConfiguration!!.fragmentEnabled,
+            fragmentSizeValue = baseConfiguration!!.fragmentSizeValue
         ))
 
         // 2. HTTP Port 80 plain CDN
@@ -190,6 +192,16 @@ class AutoScannerActivity : Activity() {
                 hostOverride = baseConfiguration!!.normalizedHostOverride.ifBlank { baseConfiguration!!.serverHost },
                 sniOverride = sni,
                 transportMode = TunnelTransportMode.WEBSOCKET
+            ))
+            
+            profiles.add(TestProfile(
+                name = "WS + SNI: $sni (Fragmented)",
+                cdnEdge = "185.239.1.185:443",
+                hostOverride = baseConfiguration!!.normalizedHostOverride.ifBlank { baseConfiguration!!.serverHost },
+                sniOverride = sni,
+                transportMode = TunnelTransportMode.WEBSOCKET,
+                fragmentEnabled = true,
+                fragmentSizeValue = 40
             ))
         }
 
@@ -262,7 +274,9 @@ class AutoScannerActivity : Activity() {
                     profile.cdnEdge,
                     profile.hostOverride,
                     profile.sniOverride,
-                    profile.transportMode.rawValue
+                    profile.transportMode.rawValue,
+                    profile.fragmentEnabled,
+                    profile.fragmentSizeValue
                 )
 
                 resultObj.put("listenPort", listenPort)
@@ -1116,7 +1130,9 @@ class AutoScannerActivity : Activity() {
         val cdnEdge: String,
         val hostOverride: String,
         val sniOverride: String,
-        val transportMode: TunnelTransportMode
+        val transportMode: TunnelTransportMode,
+        val fragmentEnabled: Boolean = false,
+        val fragmentSizeValue: Int = 40
     ) {
         fun networkCacheKey(): String {
             return listOf(

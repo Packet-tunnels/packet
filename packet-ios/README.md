@@ -54,8 +54,7 @@ open packet-ios/Packet.xcodeproj
 
 ## Current scope
 
-The current app target is a test harness for the Rust client and live logs.
-It starts the Rust SOCKS5 client and shows output in SwiftUI.
+The current iOS build installs a Packet Tunnel extension and creates an iOS VPN configuration.
+Today it operates in proxy-routed mode through the packet tunnel's proxy settings, using the Rust client as the tunnel core.
 
-It does **not** yet route all device traffic through iOS system VPN APIs.
-That next step requires a Packet Tunnel extension and the proper Apple VPN entitlement.
+It does **not** yet forward raw `packetFlow` traffic as a full-device VPN, so release copy and App Review Notes should describe the product accordingly.

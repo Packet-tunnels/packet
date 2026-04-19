@@ -17,7 +17,10 @@ struct PacketDashboardCompactView: View {
             }
             .tag(0)
 
-            PacketSettingsView(tunnelManager: tunnelManager)
+            PacketSettingsView(
+                tunnelManager: tunnelManager,
+                complianceStore: complianceStore
+            )
             .tabItem {
                 Label("Settings", systemImage: "slider.horizontal.3")
             }

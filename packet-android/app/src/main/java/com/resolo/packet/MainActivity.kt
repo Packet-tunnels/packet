@@ -51,13 +51,11 @@ private data class StatusPalette(
 )
 
 class MainActivity : Activity() {
-    private lateinit var statusText: TextView
-    private lateinit var statusDetailText: TextView
-    private lateinit var statusBannerText: TextView
-    private lateinit var statusBadge: View
-    private lateinit var statusIndicator: View
+    private lateinit var disclosureReminderCard: View
     private lateinit var statusBadgeText: TextView
     private lateinit var statusTimerText: TextView
+    private lateinit var configStatusSummary: TextView
+    private lateinit var statusBannerText: TextView
     private lateinit var configPrimaryText: TextView
     private lateinit var configSecondaryText: TextView
     private lateinit var configDetailText: TextView
@@ -84,7 +82,11 @@ class MainActivity : Activity() {
     private lateinit var bottomBar: View
 
     private var currentConfiguration = TunnelConfiguration()
+    private var currentConfigurationEntry: SavedTunnelConfiguration? = null
+    private var activeConfigurationId: String? = null
+    private var activeConfigurationSnapshot: TunnelConfiguration? = null
     private var pendingStartAfterPermission = false
+    private var hasPresentedInitialDisclosure = false
     private var receiverRegistered = false
     private var rateAnchor: RuntimeRateAnchor? = null
     private var logsCollapsed = true
@@ -135,13 +137,11 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        statusText = findViewById(R.id.statusText)
-        statusDetailText = findViewById(R.id.statusDetailText)
-        statusBannerText = findViewById(R.id.statusBannerText)
-        statusBadge = findViewById(R.id.statusBadge)
-        statusIndicator = findViewById(R.id.statusIndicator)
+        disclosureReminderCard = findViewById(R.id.disclosureReminderCard)
         statusBadgeText = findViewById(R.id.statusBadgeText)
         statusTimerText = findViewById(R.id.statusTimerText)
+        configStatusSummary = findViewById(R.id.configStatusSummary)
+        statusBannerText = findViewById(R.id.statusBannerText)
         configPrimaryText = findViewById(R.id.configPrimaryText)
         configSecondaryText = findViewById(R.id.configSecondaryText)
         configDetailText = findViewById(R.id.configDetailText)
@@ -165,9 +165,8 @@ class MainActivity : Activity() {
         logsContent = findViewById(R.id.logsContent)
         logsView = findViewById(R.id.logsView)
         logsScrollView = findViewById(R.id.logsScrollView)
-        bottomBar = findViewById(R.id.bottomBar)
 
-        currentConfiguration = TunnelPreferences.loadConfiguration(this)
+        refreshConfigurationState()
         PacketBridge.setLogCallback(logCallback)
         applyBottomBarInsets()
         renderConfigurationSummary()
@@ -182,7 +181,11 @@ class MainActivity : Activity() {
         }
 
         settingsButton.setOnClickListener {
-            showSettingsDialog()
+            startActivity(Intent(this, SettingsActivity::class.java))
+        }
+
+        disclosureReminderCard.setOnClickListener {
+            showDisclosureDialog(isConnectFlow = false)
         }
 
         toggleLogsButton.setOnClickListener {
@@ -230,17 +233,19 @@ class MainActivity : Activity() {
     override fun onStart() {
         super.onStart()
         registerTunnelReceiver()
-        currentConfiguration = TunnelPreferences.loadConfiguration(this)
+        refreshConfigurationState()
         reconcileStalledTunnelState()
         reconcileVpnPermissionState()
         renderConfigurationSummary()
         renderState()
         renderDashboard()
         renderLogs()
+        presentInitialDisclosureIfNeeded()
     }
 
     override fun onResume() {
         super.onResume()
+        refreshConfigurationState()
         reconcileStalledTunnelState()
         reconcileVpnPermissionState()
         renderState()
@@ -295,6 +300,18 @@ class MainActivity : Activity() {
     }
 
     private fun requestConnect() {
+        if (!TunnelPreferences.isVpnDisclosureAcknowledged(this)) {
+            showDisclosureDialog(
+                isConnectFlow = true,
+                onAccept = { requestConnectInternal() },
+            )
+            return
+        }
+
+        requestConnectInternal()
+    }
+
+    private fun requestConnectInternal() {
         TunnelLogStore.append(this, "[APP] Connect requested")
         val validationError = validate(currentConfiguration)
         if (validationError != null) {
@@ -379,19 +396,24 @@ class MainActivity : Activity() {
     }
 
     private fun renderState() {
+        refreshConfigurationState()
         reconcileStalledTunnelState()
         val snapshot = TunnelPreferences.loadSnapshot(this)
+        disclosureReminderCard.visibility = if (TunnelPreferences.isVpnDisclosureAcknowledged(this)) {
+            View.GONE
+        } else {
+            View.VISIBLE
+        }
         renderStatusPanel(
             snapshot = snapshot,
             runtime = TunnelPreferences.loadRuntimeSnapshot(this),
-            diagnostics = TunnelPreferences.loadDiagnostics(this),
         )
         startButton.text = when (snapshot.state) {
-            TunnelState.REQUESTING_PERMISSION -> "Approve VPN"
-            TunnelState.CONNECTING -> "Starting..."
-            TunnelState.DISCONNECTING -> "Stopping..."
-            TunnelState.RUNNING -> "Disconnect Tunnel"
-            else -> "Connect Tunnel"
+            TunnelState.REQUESTING_PERMISSION -> "Approve"
+            TunnelState.CONNECTING -> "Starting"
+            TunnelState.DISCONNECTING -> "Stopping"
+            TunnelState.RUNNING -> "Stop"
+            else -> "Connect"
         }
         startButton.isEnabled = snapshot.state != TunnelState.CONNECTING &&
             snapshot.state != TunnelState.DISCONNECTING
@@ -402,7 +424,7 @@ class MainActivity : Activity() {
             TunnelState.RUNNING -> "#EF4444"
             TunnelState.CONNECTING -> "#F59E0B"
             TunnelState.DISCONNECTING -> "#6B7280"
-            else -> "#2563EB"
+            else -> "#000000"
         }
         startButton.backgroundTintList = ColorStateList.valueOf(Color.parseColor(colorHex))
         scheduleStateWatchdog(snapshot)
@@ -478,53 +500,68 @@ class MainActivity : Activity() {
     }
 
     private fun renderConfigurationSummary() {
-        val server = currentConfiguration.normalizedServerUrl.ifEmpty { "No server configured" }
-        val port = currentConfiguration.listenPortValue?.toString()
-            ?: currentConfiguration.listenPort.takeIf { it.isNotBlank() && !it.equals("auto", ignoreCase = true) }
+        refreshConfigurationState()
+        val snapshot = TunnelPreferences.loadSnapshot(this)
+        val runtime = TunnelPreferences.loadRuntimeSnapshot(this)
+        val configuration = displayConfiguration(snapshot, runtime)
+        val server = configuration.normalizedServerUrl.ifEmpty { "No server configured" }
+        val port = configuration.listenPortValue?.toString()
+            ?: configuration.listenPort.takeIf { it.isNotBlank() && !it.equals("auto", ignoreCase = true) }
             ?: "Auto"
 
         configPrimaryText.text = server
 
-        val secondaryParts = mutableListOf("Port $port", currentConfiguration.transportLabel)
-        secondaryParts += currentConfiguration.ingressLabel
+        val secondaryParts = mutableListOf("Port $port", configuration.transportLabel)
+        secondaryParts += configuration.ingressLabel
         configSecondaryText.text = secondaryParts.joinToString(" · ")
 
         val detailLines = mutableListOf<String>()
-        if (currentConfiguration.normalizedServerUrl.isBlank()) {
+        if (configuration.normalizedServerUrl.isBlank()) {
             detailLines += "Server host: Not set"
             detailLines += "Endpoint: Not set"
         } else {
-            detailLines += "Server host: ${currentConfiguration.serverHost}"
-            detailLines += "Endpoint: ${currentConfiguration.endpointHost}:${currentConfiguration.endpointPort}"
+            detailLines += "Server host: ${configuration.serverHost}"
+            detailLines += "Endpoint: ${configuration.endpointHost}:${configuration.endpointPort}"
         }
-        if (currentConfiguration.normalizedHostOverride.isNotEmpty()) {
-            detailLines += "Host override: ${currentConfiguration.normalizedHostOverride}"
+        if (configuration.normalizedHostOverride.isNotEmpty()) {
+            detailLines += "Host override: ${configuration.normalizedHostOverride}"
         }
-        if (currentConfiguration.normalizedCdnEdge.isNotEmpty()) {
-            detailLines += "CDN edge: ${currentConfiguration.normalizedCdnEdge}"
+        if (configuration.normalizedCdnEdge.isNotEmpty()) {
+            detailLines += "CDN edge: ${configuration.normalizedCdnEdge}"
         }
-        if (currentConfiguration.normalizedSniOverride.isNotEmpty()) {
-            detailLines += "SNI override: ${currentConfiguration.normalizedSniOverride}"
+        if (configuration.normalizedSniOverride.isNotEmpty()) {
+            detailLines += "SNI override: ${configuration.normalizedSniOverride}"
+        }
+        if (selectedConfigurationDisplayName().isNotBlank()) {
+            detailLines += "Selected profile: ${selectedConfigurationDisplayName()}"
+        }
+        activeConfigurationDisplayName()?.let { activeName ->
+            if (snapshot.state.isActive || runtime.tunnelActive) {
+                detailLines += "Active profile: $activeName"
+            }
         }
         configDetailText.text = detailLines.joinToString(separator = "\n")
     }
 
     private fun renderDashboard() {
+        refreshConfigurationState()
         val snapshot = TunnelPreferences.loadSnapshot(this)
         val runtime = TunnelPreferences.loadRuntimeSnapshot(this)
         val diagnostics = TunnelPreferences.loadDiagnostics(this)
         val (uploadRateBps, downloadRateBps) = computeRates(runtime)
+        val configuration = displayConfiguration(snapshot, runtime)
 
-        renderStatusPanel(snapshot, runtime, diagnostics)
+        renderStatusPanel(snapshot, runtime)
+        renderConfigurationSummary()
 
-        metricTransportValue.text = runtime.transport.ifBlank { currentConfiguration.transportLabel }
+        metricTransportValue.text = runtime.transport.ifBlank { configuration.transportLabel }
         metricTransportDetail.text = buildList {
             add(runtime.state.ifBlank { snapshot.state.title })
-            runtime.listenPort?.let { add("Port $it") }
+            add("Port ${runtime.listenPort ?: configuration.listenPortValue ?: "Auto"}")
         }.joinToString(separator = " · ")
 
         val endpointValue = diagnostics.endpointHost.ifBlank {
-            runtime.endpointHost.ifBlank { currentConfiguration.endpointHost }
+            runtime.endpointHost.ifBlank { configuration.endpointHost }
         }
         metricEndpointValue.text = endpointValue
         metricEndpointDetail.text = when (diagnostics.endpointReachable) {
@@ -589,93 +626,119 @@ class MainActivity : Activity() {
     private fun renderStatusPanel(
         snapshot: TunnelSnapshot,
         runtime: TunnelRuntimeSnapshot,
-        diagnostics: TunnelDiagnosticsSnapshot,
     ) {
+        refreshConfigurationState()
         val palette = statusPalette(snapshot)
         val isRunning = snapshot.state == TunnelState.RUNNING || runtime.tunnelActive
-        val upstreamReady = runtime.tunnelActive ||
-            runtime.connectedSince != null ||
-            runtime.state.equals("connected", ignoreCase = true)
-        val shellReady = snapshot.state == TunnelState.RUNNING &&
-            diagnostics.localProxyReady &&
-            diagnostics.vpnShellReady
-
-        statusBadge.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(999f)
-            setColor(palette.accentSoft)
-        }
-        statusIndicator.background = GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(palette.accent)
-        }
-        statusBannerText.background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            cornerRadius = dpToPx(14f)
-            setColor(palette.bannerBackground)
-        }
-
+        val configuration = displayConfiguration(snapshot, runtime)
+        
         statusBadgeText.text = when (snapshot.state) {
-            TunnelState.RUNNING -> if (upstreamReady) "ACTIVE" else "AUTH"
-            TunnelState.CONNECTING -> "STARTING"
+            TunnelState.RUNNING -> "CONNECTED"
+            TunnelState.CONNECTING -> "CONNECTING"
             TunnelState.REQUESTING_PERMISSION -> "APPROVAL"
             TunnelState.DISCONNECTING -> "STOPPING"
-            TunnelState.FAILED -> "ERROR"
-            TunnelState.IDLE -> "IDLE"
+            TunnelState.FAILED -> "FAILED"
+            TunnelState.IDLE -> "DISCONNECTED"
         }
         statusBadgeText.setTextColor(palette.accent)
-        statusTimerText.text = when {
-            isRunning && runtime.connectedSince != null -> formatConnectedDuration(runtime.connectedSince)
-            shellReady && !upstreamReady -> "Waiting for upstream auth"
-            snapshot.state == TunnelState.REQUESTING_PERMISSION -> "Awaiting VPN approval"
-            snapshot.state == TunnelState.CONNECTING -> "Bringing tunnel online"
-            snapshot.state == TunnelState.DISCONNECTING -> "Shutting down"
-            snapshot.state == TunnelState.FAILED -> "Needs attention"
-            else -> "Not connected"
+
+        if (isRunning && runtime.connectedSince != null) {
+            statusTimerText.text = formatConnectedDuration(runtime.connectedSince)
+        } else {
+            statusTimerText.text = "Not Protected"
         }
-        statusText.text = when (snapshot.state) {
-            TunnelState.RUNNING -> if (upstreamReady) "Tunnel is active" else "Tunnel shell is active"
-            TunnelState.CONNECTING -> "Starting tunnel"
-            TunnelState.REQUESTING_PERMISSION -> "VPN approval required"
-            TunnelState.DISCONNECTING -> "Stopping tunnel"
-            TunnelState.FAILED -> "Tunnel failed"
-            TunnelState.IDLE -> "Tunnel is idle"
+
+        val error = snapshot.message.takeIf { snapshot.state == TunnelState.FAILED }
+            ?: runtime.lastError?.takeIf { it.isNotBlank() }
+            ?: configuration.validationError
+        
+        if (error != null) {
+            statusBannerText.text = error
+            statusBannerText.visibility = View.VISIBLE
+        } else {
+            statusBannerText.visibility = View.GONE
         }
-        statusDetailText.text = snapshot.message
-        statusBannerText.text = buildStatusBanner(snapshot, runtime, diagnostics)
-        statusBannerText.setTextColor(palette.bannerText)
+
+        configStatusSummary.text = configurationStatusSummary(snapshot, runtime)
     }
 
-    private fun buildStatusBanner(
+    private fun refreshConfigurationState() {
+        currentConfigurationEntry = TunnelPreferences.loadSelectedConfigurationEntry(this)
+        currentConfiguration = currentConfigurationEntry?.configuration ?: TunnelPreferences.loadConfiguration(this)
+        activeConfigurationId = TunnelPreferences.loadActiveConfigurationId(this)
+        activeConfigurationSnapshot = TunnelPreferences.loadActiveConfiguration(this)
+    }
+
+    private fun displayConfiguration(
         snapshot: TunnelSnapshot,
         runtime: TunnelRuntimeSnapshot,
-        diagnostics: TunnelDiagnosticsSnapshot,
+    ): TunnelConfiguration {
+        return if (shouldShowActiveConfiguration(snapshot, runtime) && activeConfigurationSnapshot != null) {
+            activeConfigurationSnapshot ?: currentConfiguration
+        } else {
+            currentConfiguration
+        }
+    }
+
+    private fun selectedConfigurationDisplayName(): String {
+        return currentConfigurationEntry?.displayName
+            ?: if (currentConfiguration.isEmpty) "No Configuration" else currentConfiguration.suggestedName
+    }
+
+    private fun activeConfigurationDisplayName(): String? {
+        return TunnelPreferences.loadActiveConfigurationDisplayName(this)
+    }
+
+    private fun configurationStatusSummary(
+        snapshot: TunnelSnapshot,
+        runtime: TunnelRuntimeSnapshot,
     ): String {
-        runtime.lastError?.takeIf { it.isNotBlank() }?.let { return it }
+        val selectedName = selectedConfigurationDisplayName()
+        val activeName = activeConfigurationDisplayName()
 
-        if (snapshot.state == TunnelState.RUNNING && diagnostics.localProxyReady && diagnostics.vpnShellReady) {
-            val transportState = runtime.state.ifBlank { "starting" }
-            if (!runtime.tunnelActive && runtime.connectedSince == null) {
-                return "Local VPN and SOCKS are up, but upstream transport is still $transportState."
-            }
+        if (!shouldShowActiveConfiguration(snapshot, runtime) || activeName.isNullOrBlank()) {
+            return "Selected configuration: $selectedName"
         }
 
-        if (snapshot.state == TunnelState.RUNNING && diagnostics.localProxyReady && diagnostics.vpnShellReady) {
-            val port = runtime.listenPort?.toString()
-                ?: currentConfiguration.listenPortValue?.toString()
-                ?: "auto"
-            return if (runtime.activeStreams > 0) {
-                "Forwarding is active on 127.0.0.1:$port with ${runtime.activeStreams} live stream(s)."
-            } else {
-                "Forwarding is active on 127.0.0.1:$port. Waiting for device traffic."
-            }
+        if (activeName == selectedName) {
+            return "Active configuration: $activeName"
         }
 
-        if (diagnostics.recommendation.isNotBlank()) {
-            return diagnostics.recommendation
+        return "Active now: $activeName. Selected next: $selectedName"
+    }
+
+    private fun shouldShowActiveConfiguration(
+        snapshot: TunnelSnapshot,
+        runtime: TunnelRuntimeSnapshot,
+    ): Boolean {
+        return runtime.tunnelActive ||
+            snapshot.state == TunnelState.RUNNING ||
+            snapshot.state == TunnelState.CONNECTING ||
+            snapshot.state == TunnelState.DISCONNECTING
+    }
+
+    private fun showDisclosureDialog(
+        isConnectFlow: Boolean,
+        onAccept: (() -> Unit)? = null,
+    ) {
+        VpnDisclosureDialogs.show(
+            activity = this,
+            acceptTitle = if (isConnectFlow) "Accept & Connect" else "Acknowledge",
+            dismissTitle = if (isConnectFlow) "Not Now" else "Dismiss",
+            onAccept = {
+                onAccept?.invoke()
+                renderState()
+            },
+        )
+    }
+
+    private fun presentInitialDisclosureIfNeeded() {
+        if (hasPresentedInitialDisclosure || TunnelPreferences.isVpnDisclosureAcknowledged(this)) {
+            return
         }
 
-        return snapshot.message
+        hasPresentedInitialDisclosure = true
+        showDisclosureDialog(isConnectFlow = false)
     }
 
     private fun statusPalette(snapshot: TunnelSnapshot): StatusPalette {
@@ -715,9 +778,9 @@ class MainActivity : Activity() {
         val minutes = (elapsedSeconds % 3600) / 60
         val seconds = elapsedSeconds % 60
         return if (hours > 0) {
-            String.format(Locale.US, "%02d:%02d:%02d live", hours, minutes, seconds)
+            String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
         } else {
-            String.format(Locale.US, "%02d:%02d live", minutes, seconds)
+            String.format(Locale.US, "%02d:%02d", minutes, seconds)
         }
     }
 
@@ -790,141 +853,11 @@ class MainActivity : Activity() {
     }
 
     private fun applyBottomBarInsets() {
-        val baseBottomPadding = bottomBar.paddingBottom
-        bottomBar.setOnApplyWindowInsetsListener { view, insets ->
-            view.setPadding(
-                view.paddingLeft,
-                view.paddingTop,
-                view.paddingRight,
-                baseBottomPadding + insets.systemWindowInsetBottom,
-            )
-            insets
-        }
-        bottomBar.requestApplyInsets()
-    }
-
-    private fun showSettingsDialog() {
-        val dialog = Dialog(this)
-        dialog.setContentView(R.layout.dialog_settings)
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        dialog.window?.setWindowAnimations(R.style.PhantomSlideDialogAnimation)
-        dialog.setCanceledOnTouchOutside(true)
-
-        val serverUrlInput = dialog.findViewById<EditText>(R.id.settingsServerUrlInput)
-        val secretInput = dialog.findViewById<EditText>(R.id.settingsSecretInput)
-        val listenPortInput = dialog.findViewById<EditText>(R.id.settingsListenPortInput)
-        val cdnEdgeInput = dialog.findViewById<EditText>(R.id.settingsCdnEdgeInput)
-        val hostOverrideInput = dialog.findViewById<EditText>(R.id.settingsHostOverrideInput)
-        val sniOverrideInput = dialog.findViewById<EditText>(R.id.settingsSniOverrideInput)
-        val transportSpinner = dialog.findViewById<Spinner>(R.id.settingsTransportSpinner)
-        val secretToggle = dialog.findViewById<ImageButton>(R.id.secretToggleVisibility)
-        val errorText = dialog.findViewById<TextView>(R.id.settingsErrorText)
-
-        transportSpinner.adapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            TunnelTransportMode.values().map { it.title },
-        ).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        }
-
-        serverUrlInput.setText(currentConfiguration.serverUrl)
-        secretInput.setText(currentConfiguration.secret)
-        listenPortInput.setText(currentConfiguration.listenPort)
-        cdnEdgeInput.setText(currentConfiguration.cdnEdge)
-        hostOverrideInput.setText(currentConfiguration.hostOverride)
-        sniOverrideInput.setText(currentConfiguration.sniOverride)
-        transportSpinner.setSelection(currentConfiguration.transportMode.ordinal)
-
-        var isSecretVisible = false
-        secretToggle.setOnClickListener {
-            isSecretVisible = !isSecretVisible
-            secretInput.inputType = if (isSecretVisible) {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-            } else {
-                InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            }
-            secretToggle.setImageResource(
-                if (isSecretVisible) {
-                    R.drawable.ic_visibility_off
-                } else {
-                    R.drawable.ic_visibility
-                },
-            )
-            secretInput.setSelection(secretInput.text.length)
-        }
-
-        dialog.findViewById<ImageButton>(R.id.settingsCloseButton).setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.findViewById<Button>(R.id.settingsCancelButton).setOnClickListener {
-            dialog.dismiss()
-        }
-
-        dialog.findViewById<Button>(R.id.settingsSaveButton).setOnClickListener {
-            val updatedConfiguration = TunnelConfiguration(
-                serverUrl = serverUrlInput.text.toString(),
-                secret = secretInput.text.toString(),
-                listenPort = listenPortInput.text.toString(),
-                cdnEdge = cdnEdgeInput.text.toString(),
-                hostOverride = hostOverrideInput.text.toString(),
-                sniOverride = sniOverrideInput.text.toString(),
-                transportMode = TunnelTransportMode.values()[transportSpinner.selectedItemPosition],
-            )
-
-            val validationError = validate(updatedConfiguration)
-            if (validationError != null) {
-                errorText.text = validationError
-                errorText.visibility = View.VISIBLE
-                return@setOnClickListener
-            }
-
-            currentConfiguration = updatedConfiguration
-            TunnelPreferences.saveConfiguration(this, updatedConfiguration)
-            TunnelLogStore.append(this, "[APP] Tunnel settings saved")
-            renderConfigurationSummary()
-            renderDashboard()
-            renderLogs()
-            dialog.dismiss()
-        }
-
-        dialog.show()
-        dialog.window?.apply {
-            setGravity(Gravity.BOTTOM)
-            setLayout(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-            )
-        }
+        // Obsolete with inline button
     }
 
     private fun validate(configuration: TunnelConfiguration): String? {
-        if (configuration.normalizedServerUrl.isEmpty()) {
-            return "Server URL is required."
-        }
-
-        if (configuration.normalizedSecret.isEmpty()) {
-            return "Shared secret is required."
-        }
-
-        val trimmedPort = configuration.listenPort.trim()
-        if (trimmedPort.isNotEmpty() &&
-            !trimmedPort.equals("auto", ignoreCase = true) &&
-            configuration.listenPortValue == null
-        ) {
-            return "Listen port must be 1024-65535, or leave it blank for auto."
-        }
-
-        configuration.cdnEdgeValidationError?.let { return it }
-
-        if (configuration.normalizedSniOverride.isNotEmpty() &&
-            !configuration.normalizedServerUrl.startsWith("https://", ignoreCase = true)
-        ) {
-            return "SNI override requires an https:// server URL."
-        }
-
-        return null
+        return configuration.validationError
     }
 
     private companion object {

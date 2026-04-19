@@ -1,7 +1,9 @@
 package com.resolo.packet
 
 import android.net.Uri
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 object TunnelActions {
     const val ACTION_CONNECT = "com.resolo.packet.action.CONNECT"
@@ -43,7 +45,18 @@ data class TunnelConfiguration(
     val hostOverride: String = "",
     val sniOverride: String = "",
     val transportMode: TunnelTransportMode = TunnelTransportMode.AUTO,
+    val fragmentEnabled: Boolean = false,
+    val fragmentSize: String = "40",
 ) {
+    val isEmpty: Boolean
+        get() = normalizedServerUrl.isEmpty() &&
+            normalizedSecret.isEmpty() &&
+            listenPort.trim().isEmpty() &&
+            normalizedCdnEdge.isEmpty() &&
+            normalizedHostOverride.isEmpty() &&
+            normalizedSniOverride.isEmpty() &&
+            transportMode == TunnelTransportMode.AUTO
+
     val normalizedServerUrl: String
         get() = serverUrl.trim()
 
@@ -108,6 +121,13 @@ data class TunnelConfiguration(
             return trimmed.toIntOrNull()?.takeIf { it in 1024..65535 }
         }
 
+    val fragmentSizeValue: Int
+        get() {
+            val default = 40
+            if (!fragmentEnabled) return default
+            return fragmentSize.trim().toIntOrNull()?.takeIf { it in 1..1000 } ?: default
+        }
+
     val serverHost: String
         get() {
             val parsedHost = runCatching { Uri.parse(normalizedServerUrl).host }.getOrNull()
@@ -158,6 +178,123 @@ data class TunnelConfiguration(
 
     val transportLabel: String
         get() = transportMode.title
+
+    val suggestedName: String
+        get() {
+            if (normalizedHostOverride.isNotEmpty()) {
+                return normalizedHostOverride
+            }
+
+            val edgeHost = normalizedCdnEdge.substringBefore(":").trim()
+            if (edgeHost.isNotEmpty()) {
+                return edgeHost
+            }
+
+            if (normalizedServerUrl.isNotEmpty()) {
+                return serverHost
+            }
+
+            return "New Server"
+        }
+
+    val validationError: String?
+        get() {
+            if (normalizedServerUrl.isEmpty()) {
+                return "Server URL is required."
+            }
+
+            if (normalizedSecret.isEmpty()) {
+                return "Shared secret is required."
+            }
+
+            val trimmedPort = listenPort.trim()
+            if (trimmedPort.isNotEmpty() &&
+                !trimmedPort.equals("auto", ignoreCase = true) &&
+                listenPortValue == null
+            ) {
+                return "Listen port must be 1024-65535, or leave it blank for auto."
+            }
+
+            cdnEdgeValidationError?.let { return it }
+
+            if (normalizedSniOverride.isNotEmpty() &&
+                !normalizedServerUrl.startsWith("https://", ignoreCase = true)
+            ) {
+                return "SNI override requires an https:// server URL."
+            }
+
+            return null
+        }
+
+    fun toJsonObject(): JSONObject {
+        return JSONObject()
+            .put("server_url", serverUrl)
+            .put("secret", secret)
+            .put("listen_port", listenPort)
+            .put("cdn_edge", cdnEdge)
+            .put("host_override", hostOverride)
+            .put("sni_override", sniOverride)
+            .put("transport_mode", transportMode.rawValue)
+    }
+
+    companion object {
+        fun fromJsonObject(json: JSONObject): TunnelConfiguration {
+            return TunnelConfiguration(
+                serverUrl = json.optString("server_url", ""),
+                secret = json.optString("secret", ""),
+                listenPort = json.optString("listen_port", ""),
+                cdnEdge = json.optString("cdn_edge", ""),
+                hostOverride = json.optString("host_override", ""),
+                sniOverride = json.optString("sni_override", ""),
+                transportMode = TunnelTransportMode.fromRawValue(
+                    json.optInt("transport_mode", TunnelTransportMode.AUTO.rawValue)
+                ),
+            )
+        }
+    }
+}
+
+data class SavedTunnelConfiguration(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String = "",
+    val configuration: TunnelConfiguration = TunnelConfiguration(),
+) {
+    val trimmedName: String
+        get() = name.trim()
+
+    val displayName: String
+        get() = trimmedName.ifEmpty { configuration.suggestedName }
+
+    val subtitle: String
+        get() = configuration.normalizedServerUrl.ifBlank { "Not configured" }
+
+    fun toJsonObject(): JSONObject {
+        return JSONObject()
+            .put("id", id)
+            .put("name", name)
+            .put("configuration", configuration.toJsonObject())
+    }
+
+    companion object {
+        fun fromJsonObject(json: JSONObject): SavedTunnelConfiguration {
+            return SavedTunnelConfiguration(
+                id = json.optString("id", UUID.randomUUID().toString()),
+                name = json.optString("name", ""),
+                configuration = TunnelConfiguration.fromJsonObject(
+                    json.optJSONObject("configuration") ?: JSONObject()
+                ),
+            )
+        }
+    }
+}
+
+private fun JSONArray.toSavedConfigurationList(): List<SavedTunnelConfiguration> {
+    return buildList {
+        for (index in 0 until length()) {
+            val item = optJSONObject(index) ?: continue
+            add(SavedTunnelConfiguration.fromJsonObject(item))
+        }
+    }
 }
 
 private fun JSONObject.optNullableString(key: String): String? {

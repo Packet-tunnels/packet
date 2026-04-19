@@ -12,6 +12,9 @@ enum TunnelConstants {
 
 enum SharedTunnelPreferenceKeys {
     static let vpnDisclosureAcknowledged = "vpnDisclosureAcknowledged"
+    static let savedConfigurations = "savedConfigurations"
+    static let selectedConfigurationID = "selectedConfigurationID"
+    static let activeConfigurationID = "activeConfigurationID"
 }
 
 enum TunnelProviderKeys {
@@ -23,7 +26,7 @@ enum TunnelProviderKeys {
     static let transportMode = "transportMode"
 }
 
-enum TunnelTransportMode: Int32, CaseIterable, Identifiable {
+enum TunnelTransportMode: Int32, CaseIterable, Identifiable, Codable {
     case auto = 0
     case webSocket = 1
     case http = 2
@@ -42,7 +45,7 @@ enum TunnelTransportMode: Int32, CaseIterable, Identifiable {
     }
 }
 
-struct TunnelConfiguration: Equatable {
+struct TunnelConfiguration: Codable, Equatable {
     var serverURL = ""
     var secret = ""
     var listenPort = ""
@@ -71,6 +74,15 @@ struct TunnelConfiguration: Equatable {
         } else if let rawValue = providerConfiguration[TunnelProviderKeys.transportMode] as? Int32 {
             transportMode = TunnelTransportMode(rawValue: rawValue) ?? .auto
         }
+    }
+
+    var isEmpty: Bool {
+        normalizedServerURL.isEmpty
+            && normalizedSecret.isEmpty
+            && Self.trimmed(listenPort).isEmpty
+            && normalizedCDNEdge.isEmpty
+            && normalizedHostOverride.isEmpty
+            && transportMode == .auto
     }
 
     var normalizedServerURL: String {
@@ -148,6 +160,30 @@ struct TunnelConfiguration: Equatable {
         return "Standard endpoint"
     }
 
+    var suggestedName: String {
+        if !normalizedHostOverride.isEmpty {
+            return normalizedHostOverride
+        }
+
+        if !normalizedCDNEdge.isEmpty {
+            let edgeHost = normalizedCDNEdge
+                .split(separator: ":")
+                .first
+                .map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if let edgeHost, !edgeHost.isEmpty {
+                return edgeHost
+            }
+        }
+
+        if !normalizedServerURL.isEmpty {
+            return remoteAddress
+        }
+
+        return "New Server"
+    }
+
     var endpointHost: String {
         if cdnEdgeValidationError != nil {
             return remoteAddress
@@ -215,6 +251,34 @@ struct TunnelConfiguration: Equatable {
     }
 }
 
+struct SavedTunnelConfiguration: Codable, Equatable, Identifiable {
+    var id: UUID
+    var name: String
+    var configuration: TunnelConfiguration
+
+    init(
+        id: UUID = UUID(),
+        name: String = "",
+        configuration: TunnelConfiguration = TunnelConfiguration()
+    ) {
+        self.id = id
+        self.name = name
+        self.configuration = configuration
+    }
+
+    var trimmedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var displayName: String {
+        trimmedName.nilIfEmpty ?? configuration.suggestedName
+    }
+
+    var subtitle: String {
+        configuration.normalizedServerURL.nilIfEmpty ?? "Not configured"
+    }
+}
+
 struct TunnelRuntimeSnapshot: Decodable, Equatable {
     var state = "idle"
     var transport = "Auto"
@@ -241,9 +305,66 @@ struct TunnelRuntimeSnapshot: Decodable, Equatable {
     }
 }
 
+struct PacketComplianceSummaryItem: Identifiable, Equatable {
+    let id: String
+    let systemImage: String
+    let title: String
+    let detail: String
+}
+
+enum PacketComplianceCopy {
+    static let reminderText =
+        "Review and accept the in-app VPN disclosure before your first connection."
+    static let disclosureIntro =
+        "Packet creates an iOS VPN configuration and uses a packet tunnel profile to send tunnel traffic through the server you configure while connected."
+    static let disclosureOutro =
+        "You can disconnect at any time from Packet or from the system VPN controls in iOS Settings."
+    static let settingsFooterText =
+        "Packet stores configuration details locally on-device and lets you review the VPN disclosure at any time."
+
+    static let summaryItems: [PacketComplianceSummaryItem] = [
+        PacketComplianceSummaryItem(
+            id: "local-storage",
+            systemImage: "internaldrive",
+            title: "Stored on This Device",
+            detail:
+                "Your server URL, shared secret, and disclosure acknowledgement stay on this device so Packet can reconnect with the same configuration."
+        ),
+        PacketComplianceSummaryItem(
+            id: "traffic-handling",
+            systemImage: "network",
+            title: "Traffic Through Your Server",
+            detail:
+                "When you connect, the server you configure receives the traffic and connection metadata required to establish and operate the tunnel."
+        ),
+        PacketComplianceSummaryItem(
+            id: "tracking",
+            systemImage: "eye.slash",
+            title: "No Ads or Trackers",
+            detail:
+                "Packet does not bundle advertising, analytics, or tracking SDKs."
+        ),
+    ]
+}
+
+extension String {
+    var nilIfEmpty: String? {
+        let trimmedValue = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedValue.isEmpty ? nil : trimmedValue
+    }
+}
+
 enum SharedTunnelPreferenceStore {
     private static var defaults: UserDefaults {
         UserDefaults(suiteName: TunnelConstants.appGroupIdentifier) ?? .standard
+    }
+
+    private static var encoder: JSONEncoder {
+        JSONEncoder()
+    }
+
+    private static var decoder: JSONDecoder {
+        JSONDecoder()
     }
 
     static var vpnDisclosureAcknowledged: Bool {
@@ -252,6 +373,58 @@ enum SharedTunnelPreferenceStore {
 
     static func setVPNDisclosureAcknowledged(_ acknowledged: Bool) {
         defaults.set(acknowledged, forKey: SharedTunnelPreferenceKeys.vpnDisclosureAcknowledged)
+    }
+
+    static var savedConfigurations: [SavedTunnelConfiguration] {
+        guard
+            let data = defaults.data(forKey: SharedTunnelPreferenceKeys.savedConfigurations),
+            let configurations = try? decoder.decode([SavedTunnelConfiguration].self, from: data)
+        else {
+            return []
+        }
+
+        return configurations
+    }
+
+    static func setSavedConfigurations(_ configurations: [SavedTunnelConfiguration]) {
+        guard let data = try? encoder.encode(configurations) else { return }
+        defaults.set(data, forKey: SharedTunnelPreferenceKeys.savedConfigurations)
+    }
+
+    static var selectedConfigurationID: UUID? {
+        guard
+            let rawValue = defaults.string(forKey: SharedTunnelPreferenceKeys.selectedConfigurationID)
+        else {
+            return nil
+        }
+
+        return UUID(uuidString: rawValue)
+    }
+
+    static func setSelectedConfigurationID(_ id: UUID?) {
+        if let id {
+            defaults.set(id.uuidString, forKey: SharedTunnelPreferenceKeys.selectedConfigurationID)
+        } else {
+            defaults.removeObject(forKey: SharedTunnelPreferenceKeys.selectedConfigurationID)
+        }
+    }
+
+    static var activeConfigurationID: UUID? {
+        guard
+            let rawValue = defaults.string(forKey: SharedTunnelPreferenceKeys.activeConfigurationID)
+        else {
+            return nil
+        }
+
+        return UUID(uuidString: rawValue)
+    }
+
+    static func setActiveConfigurationID(_ id: UUID?) {
+        if let id {
+            defaults.set(id.uuidString, forKey: SharedTunnelPreferenceKeys.activeConfigurationID)
+        } else {
+            defaults.removeObject(forKey: SharedTunnelPreferenceKeys.activeConfigurationID)
+        }
     }
 }
 

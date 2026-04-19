@@ -41,6 +41,8 @@ object PhantomTunnel {
         hostOverride: String,
         sniOverride: String,
         transportMode: Int,
+        fragmentEnabled: Boolean,
+        fragmentSize: Int,
     ): Int
 
     @JvmStatic

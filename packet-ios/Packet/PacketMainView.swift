@@ -34,22 +34,6 @@ struct PacketMainView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.8), value: tunnelManager.state)
             .navigationTitle("Packet")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(statusColor)
-                            .frame(width: 6, height: 6)
-                            .shadow(color: statusColor.opacity(0.6), radius: tunnelManager.isRunning ? 4 : 0)
-                            .animation(
-                                tunnelManager.isRunning
-                                    ? .easeInOut(duration: 1).repeatForever()
-                                    : .default,
-                                value: tunnelManager.isRunning
-                            )
-                    }
-                }
-            }
             .sheet(isPresented: $showingDisclosureSheet, onDismiss: handleDisclosureDismissed) {
                 PacketVPNDisclosureSheet(
                     isConnectFlow: shouldStartTunnelAfterDisclosure,
@@ -65,56 +49,58 @@ struct PacketMainView: View {
     // MARK: - Views
 
     private var mainDashboardCard: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
+        VStack(spacing: 16) {
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(statusHeadline.uppercased())
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
                         .foregroundStyle(statusColor)
                         .tracking(1.0)
 
-                    Text(tunnelManager.state == .running ? "Secured" : "Offline")
-                        .font(.system(size: 32, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.primary)
+                    if tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive {
+                        if let connectedSince = tunnelManager.telemetry.snapshot.connectedSince {
+                            Text(Date(timeIntervalSince1970: TimeInterval(connectedSince)), style: .timer)
+                                .font(.system(size: 20, weight: .semibold, design: .rounded).monospacedDigit())
+                                .foregroundStyle(.primary)
+                        } else {
+                            Text("00:00")
+                                .font(.system(size: 20, weight: .semibold, design: .rounded).monospacedDigit())
+                                .foregroundStyle(.primary)
+                        }
+                    } else {
+                        Text("Not Protected")
+                            .font(.system(size: 20, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
+                    }
                 }
-
-                Spacer()
-
-                if tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive {
-                    Text(statusTimerText)
-                        .font(.system(size: 14, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 6)
-                        .background(Color(uiColor: .tertiarySystemFill))
-                        .clipShape(Capsule())
-                }
-            }
-
-            Text(statusBannerText)
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-                .overlay(Color(uiColor: .quaternarySystemFill))
-
-            HStack {
-                Text(bannerDetailLine)
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
 
                 Spacer()
 
                 actionButton
             }
+
+            Text(configurationSelectionText)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let errorText = connectionErrorText {
+                Text(errorText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color.red.opacity(0.1))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            }
         }
-        .padding(24)
+        .padding(20)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: Color.black.opacity(0.04), radius: 16, x: 0, y: 8)
+        .shadow(color: Color.black.opacity(0.04), radius: 12, x: 0, y: 6)
     }
 
     private var disclosureReminderCard: some View {
@@ -128,7 +114,7 @@ struct PacketMainView: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.primary)
 
-                Text("Accept the in-app VPN disclosure before initiating your first connection.")
+                Text(PacketComplianceCopy.reminderText)
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,7 +133,7 @@ struct PacketMainView: View {
     private var metricsGrid: some View {
         let telemetry = tunnelManager.telemetry
         let snapshot = telemetry.snapshot
-        let configuration = tunnelManager.configuration
+        let configuration = tunnelManager.displayConfiguration
 
         return LazyVGrid(columns: metricColumns, spacing: 16) {
             ModernMetricTile(
@@ -227,80 +213,56 @@ struct PacketMainView: View {
     private var statusHeadline: String {
         switch tunnelManager.state {
         case .running:
-            return "Active Connection"
+            return "Connected"
         case .launching:
-            return "Initializing"
+            return "Connecting"
         case .failed:
-            return "Connection Failed"
+            return "Failed"
         case .idle:
-            return "Standby Mode"
+            return "Disconnected"
         }
     }
 
-    private var statusTimerText: String {
+    private var connectionErrorText: String? {
         let snapshot = tunnelManager.telemetry.snapshot
-        if (tunnelManager.state == .running || snapshot.tunnelActive),
-            let connectedSince = snapshot.connectedSince
-        {
-            return formatConnectedDuration(connectedSince)
-        }
-        return "00:00"
-    }
-
-    private var statusBannerText: String {
-        let snapshot = tunnelManager.telemetry.snapshot
-        let configuration = tunnelManager.configuration
-
-        if !complianceStore.vpnDisclosureAcknowledged {
-            return "Accept the VPN data-use disclosure to enable the first connection."
-        }
+        let configuration = tunnelManager.displayConfiguration
         if let lastError = snapshot.lastError?.nilIfEmpty {
             return lastError
         }
         if let cdnEdgeValidationError = configuration.cdnEdgeValidationError {
             return cdnEdgeValidationError
         }
-
-        if tunnelManager.state == .running || snapshot.tunnelActive {
-            let port = snapshot.listenPort.map { String($0) }
-                ?? configuration.listenPortValue.map { String($0) }
-                ?? configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-                ?? "auto"
-
-            return snapshot.activeStreams > 0
-                ? "Forwarding active on localhost:\(port) with \(snapshot.activeStreams) stream(s)."
-                : "Forwarding active on localhost:\(port). Awaiting traffic."
+        if tunnelManager.state == .failed {
+            return tunnelManager.lastResult.nilIfEmpty ?? "Unknown connection error"
         }
-
-        if configuration.normalizedServerURL.isEmpty || configuration.normalizedSecret.isEmpty {
-            return "Configuration incomplete. Set URL and secret in Settings."
+        if !tunnelManager.isRunning,
+            (configuration.normalizedServerURL.isEmpty || configuration.normalizedSecret.isEmpty)
+        {
+            return "Configuration incomplete. Add the server URL and shared secret in Settings."
         }
-
-        switch tunnelManager.state {
-        case .launching:
-            return "Applying network profile and initiating tunnel."
-        case .failed:
-            return tunnelManager.lastResult
-        case .idle:
-            return "System ready. Initiate connection to begin routing."
-        case .running:
-            return tunnelManager.lastResult
-        }
+        return nil
     }
 
-    private var bannerDetailLine: String {
-        let snapshot = tunnelManager.telemetry.snapshot
-        let configuration = tunnelManager.configuration
-        let parts = [
-            configuration.ingressLabel,
-            snapshot.lastPingMs.map { "\($0)ms" } ?? "0ms"
-        ]
-        return parts.joined(separator: " • ")
+    private var configurationSelectionText: String {
+        let selectedConfiguration = tunnelManager.selectedConfigurationDisplayName
+
+        guard
+            (tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive),
+            let activeConfiguration = tunnelManager.activeConfigurationDisplayName
+        else {
+            return "Selected configuration: \(selectedConfiguration)"
+        }
+
+        if activeConfiguration == selectedConfiguration {
+            return "Active configuration: \(activeConfiguration)"
+        }
+
+        return "Active now: \(activeConfiguration). Selected next: \(selectedConfiguration)"
     }
 
     private var transportMetricDetail: String {
         let snapshot = tunnelManager.telemetry.snapshot
-        let configuration = tunnelManager.configuration
+        let configuration = tunnelManager.displayConfiguration
         let port = snapshot.listenPort.map { String($0) }
             ?? configuration.listenPortValue.map { String($0) }
             ?? configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -363,19 +325,6 @@ struct PacketMainView: View {
     private func formatRate(_ bytesPerSecond: Double) -> String {
         "\(formatBytes(UInt64(max(bytesPerSecond, 0))))/s"
     }
-
-    private func formatConnectedDuration(_ connectedSinceSeconds: UInt64) -> String {
-        let nowSeconds = UInt64(Date().timeIntervalSince1970)
-        let elapsedSeconds = max(Int64(nowSeconds) - Int64(connectedSinceSeconds), 0)
-        let hours = elapsedSeconds / 3600
-        let minutes = (elapsedSeconds % 3600) / 60
-        let seconds = elapsedSeconds % 60
-
-        if hours > 0 {
-            return String(format: "%02lld:%02lld:%02lld", hours, minutes, seconds)
-        }
-        return String(format: "%02lld:%02lld", minutes, seconds)
-    }
 }
 
 // MARK: - Subviews
@@ -402,15 +351,16 @@ struct ModernMetricTile: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(value)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                    .minimumScaleFactor(0.5)
 
                 Text(detail)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.5)
             }
         }
         .padding(16)
@@ -420,7 +370,7 @@ struct ModernMetricTile: View {
     }
 }
 
-private struct PacketVPNDisclosureSheet: View {
+struct PacketVPNDisclosureSheet: View {
     let isConnectFlow: Bool
     let acceptTitle: String
     let onAccept: () -> Void
@@ -428,26 +378,34 @@ private struct PacketVPNDisclosureSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("VPN Data-Use Disclosure", systemImage: "checkmark.shield.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(.primary)
+            VStack(spacing: 0) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("VPN Data-Use Disclosure", systemImage: "checkmark.shield.fill")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.primary)
 
-                    Text("Packet creates an iOS VPN profile and routes your traffic through the configured tunnel while connected.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                            Text(PacketComplianceCopy.disclosureIntro)
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                        }
 
-                    Text("Your server settings and disclosure acknowledgement are stored locally on this device so the tunnel can reconnect with the same configuration.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                        VStack(spacing: 12) {
+                            ForEach(PacketComplianceCopy.summaryItems) { item in
+                                PacketDisclosureSummaryCard(item: item)
+                            }
+                        }
 
-                    Text("You can disconnect at any time from Packet or from the system VPN controls in iOS Settings.")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                        Text(PacketComplianceCopy.disclosureOutro)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.top, 24)
+                    .padding(.bottom, 20)
                 }
-
-                Spacer(minLength: 0)
 
                 VStack(spacing: 12) {
                     Button(action: onAccept) {
@@ -464,13 +422,44 @@ private struct PacketVPNDisclosureSheet: View {
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
+                .padding(24)
+                .background(Color(uiColor: .systemGroupedBackground))
             }
-            .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+    }
+}
+
+private struct PacketDisclosureSummaryCard: View {
+    let item: PacketComplianceSummaryItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: item.systemImage)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.primary)
+
+                Text(item.detail)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

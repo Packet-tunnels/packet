@@ -9,11 +9,23 @@ import java.util.TimeZone
 
 object TunnelDiagnosticReport {
     fun build(context: Context): String {
-        val configuration = TunnelPreferences.loadConfiguration(context)
         val snapshot = TunnelPreferences.loadSnapshot(context)
         val runtime = TunnelPreferences.loadRuntimeSnapshot(context)
         val diagnostics = TunnelPreferences.loadDiagnostics(context)
         val logs = TunnelLogStore.load(context)
+        val selectedConfiguration = TunnelPreferences.loadSelectedConfigurationEntry(context)
+        val activeConfiguration = TunnelPreferences.loadActiveConfiguration(context)
+        val activeConfigurationName = TunnelPreferences.loadActiveConfigurationDisplayName(context)
+        val configuration = if (
+            runtime.tunnelActive ||
+            snapshot.state == TunnelState.RUNNING ||
+            snapshot.state == TunnelState.CONNECTING ||
+            snapshot.state == TunnelState.DISCONNECTING
+        ) {
+            activeConfiguration ?: TunnelPreferences.loadConfiguration(context)
+        } else {
+            TunnelPreferences.loadConfiguration(context)
+        }
 
         return buildString {
             appendLine("Packet Diagnostic Report")
@@ -24,6 +36,8 @@ object TunnelDiagnosticReport {
             appendLine("State Message: ${snapshot.message}")
             appendLine()
             appendLine("[Configuration]")
+            appendLine("selected_configuration=${selectedConfiguration?.displayName ?: "(none)"}")
+            appendLine("active_configuration=${activeConfigurationName ?: "(none)"}")
             appendLine("server_url=${configuration.normalizedServerUrl.ifBlank { "(empty)" }}")
             appendLine("transport=${configuration.transportLabel}")
             appendLine("listen_port_request=${configuration.listenPort.ifBlank { "auto" }}")
@@ -58,6 +72,7 @@ object TunnelDiagnosticReport {
             appendLine("recommendation=${diagnostics.recommendation}")
             appendLine("last_failure_detail=${diagnostics.lastFailureDetail ?: "(none)"}")
             appendLine("last_updated_ms=${diagnostics.lastUpdatedMs ?: "(none)"}")
+            appendLine("vpn_disclosure_acknowledged=${TunnelPreferences.isVpnDisclosureAcknowledged(context)}")
             appendLine()
             appendLine("[Logs]")
             if (logs.isEmpty()) {

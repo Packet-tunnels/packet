@@ -84,6 +84,7 @@ class TunnelVpnService : VpnService() {
 
         val configuration = TunnelPreferences.loadConfiguration(this)
         activeConfiguration = configuration
+        TunnelPreferences.markSelectedConfigurationActive(this, configuration)
         lastRuntimeErrorLogged = null
         TunnelPreferences.updateRuntimeSnapshot(this, initialRuntimeSnapshot(configuration))
         TunnelPreferences.updateDiagnostics(this, initialDiagnostics(configuration))
@@ -281,7 +282,9 @@ class TunnelVpnService : VpnService() {
                 vpnShellReady = false,
                 localProxyReady = false,
                 recommendation = buildRecommendation(
-                    configuration = activeConfiguration ?: TunnelPreferences.loadConfiguration(this),
+                    configuration = activeConfiguration
+                        ?: TunnelPreferences.loadActiveConfiguration(this)
+                        ?: TunnelPreferences.loadConfiguration(this),
                     diagnostics = TunnelPreferences.loadDiagnostics(this).copy(
                         vpnShellReady = false,
                         localProxyReady = false,
@@ -299,7 +302,9 @@ class TunnelVpnService : VpnService() {
 
     private fun failStart(message: String) {
         connectInFlight = false
-        val configuration = activeConfiguration ?: TunnelPreferences.loadConfiguration(this)
+        val configuration = activeConfiguration
+            ?: TunnelPreferences.loadActiveConfiguration(this)
+            ?: TunnelPreferences.loadConfiguration(this)
         TunnelLogStore.append(this, "[VPN] $message")
         stopTelemetryRefresh()
         TunnelPreferences.updateRuntimeSnapshot(
@@ -380,7 +385,9 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun refreshRuntimeTelemetry() {
-        val configuration = activeConfiguration ?: TunnelPreferences.loadConfiguration(this)
+        val configuration = activeConfiguration
+            ?: TunnelPreferences.loadActiveConfiguration(this)
+            ?: TunnelPreferences.loadConfiguration(this)
         val runtimeSnapshot = TunnelRuntimeSnapshot.fromJsonString(PacketBridge.copyStatsJson())
         TunnelPreferences.updateRuntimeSnapshot(this, runtimeSnapshot)
 
@@ -416,6 +423,8 @@ class TunnelVpnService : VpnService() {
                 configuration.normalizedHostOverride,
                 configuration.normalizedSniOverride,
                 configuration.transportMode.rawValue,
+                configuration.fragmentEnabled,
+                configuration.fragmentSizeValue,
             )
         } else {
             PacketBridge.startClient(

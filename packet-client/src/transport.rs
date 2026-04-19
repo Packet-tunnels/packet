@@ -26,7 +26,7 @@ use reqwest::Client;
 use std::error::Error as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
@@ -166,7 +166,11 @@ impl TransportConfig {
             };
             format!("{}://{}{}", scheme, authority, normalized_path)
         } else {
-            format!("{}{}", self.server_url.trim_end_matches('/'), normalized_path)
+            format!(
+                "{}{}",
+                self.server_url.trim_end_matches('/'),
+                normalized_path
+            )
         }
     }
 
@@ -310,7 +314,11 @@ async fn ws_session(
         info!(
             "[PHANTOM] TCP fragmentation enabled ({}B chunks) for {} handshake",
             config.fragment_size,
-            if config.is_tls() { "TLS" } else { "plaintext WS" }
+            if config.is_tls() {
+                "TLS"
+            } else {
+                "plaintext WS"
+            }
         );
         FragmentStream::new(tcp, config.fragment_size)
     } else {
@@ -336,13 +344,11 @@ async fn ws_session(
             .map_err(|e| format!("Invalid FQDN for SNI ({}): {}", sni, e))?
             .to_owned();
 
-        let tls_stream = tokio::time::timeout(
-            Duration::from_secs(15),
-            connector.connect(server_name, tcp)
-        )
-        .await
-        .map_err(|_| format!("TLS handshake timed out (DPI blackhole? SNI: {})", sni))?
-        .map_err(|e| format!("TLS handshake failed (SNI: {}): {}", sni, e))?;
+        let tls_stream =
+            tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, tcp))
+                .await
+                .map_err(|_| format!("TLS handshake timed out (DPI blackhole? SNI: {})", sni))?
+                .map_err(|e| format!("TLS handshake failed (SNI: {}): {}", sni, e))?;
 
         info!(
             "[PHANTOM] WS handshake: upgrade request to {} via TLS",
@@ -350,7 +356,7 @@ async fn ws_session(
         );
         let (ws_stream, response) = tokio::time::timeout(
             Duration::from_secs(15),
-            tokio_tungstenite::client_async(request, tls_stream)
+            tokio_tungstenite::client_async(request, tls_stream),
         )
         .await
         .map_err(|_| "WebSocket TLS handshake timed out (DPI blackhole or CDN drop)")?
@@ -370,11 +376,16 @@ async fn ws_session(
         );
         let (ws_stream, response) = tokio::time::timeout(
             Duration::from_secs(15),
-            tokio_tungstenite::client_async(request, tcp)
+            tokio_tungstenite::client_async(request, tcp),
         )
         .await
         .map_err(|_| "WebSocket plaintext handshake timed out (DPI blackhole or CDN drop)")?
-        .map_err(|e| format!("WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)", host, connect_addr, e))?;
+        .map_err(|e| {
+            format!(
+                "WebSocket handshake to {} via {} failed: {} (CDN may block WS or Host mismatch)",
+                host, connect_addr, e
+            )
+        })?;
 
         info!(
             "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",
@@ -401,11 +412,10 @@ where
     let key = config.key;
 
     // ── Authenticate ──
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let sig = sign_auth(&config.secret, ts);
-    let auth_json = serde_json::json!({"ts": ts, "sig": sig}).to_string();
+    let auth_request = build_auth_request(&config.secret);
+    let auth_json = serde_json::to_string(&auth_request)?;
 
-    info!("[PHANTOM] Sending auth (ts={})...", ts);
+    info!("[PHANTOM] Sending auth (ts={})...", auth_request.ts);
     ws_sender
         .send(Message::Text(auth_json))
         .await
@@ -545,8 +555,7 @@ async fn run_http_loop(
     // Build HTTP client with connection pooling
     let mut client_builder = Client::builder()
         .pool_max_idle_per_host(4)
-        .timeout(Duration::from_secs(30))
-        .danger_accept_invalid_certs(true); // for CDN flexibility
+        .timeout(Duration::from_secs(30));
 
     if let Some((request_host, connect_addr)) = config.http_resolve_override() {
         info!(
@@ -556,16 +565,16 @@ async fn run_http_loop(
         client_builder = client_builder.resolve(&request_host, connect_addr);
     }
 
-    let http_client = client_builder
-        .build()
-        .expect("failed to build HTTP client");
+    let http_client = client_builder.build().expect("failed to build HTTP client");
 
     // Authenticate with server
     let auth_url = config.http_request_url("/api/v1/auth/login");
     info!(
         "[PHANTOM] HTTP authenticating: url={} host={} connect_addr={}",
         auth_url,
-        config.http_host_header().unwrap_or_else(|| "(default)".to_string()),
+        config
+            .http_host_header()
+            .unwrap_or_else(|| "(default)".to_string()),
         config.connect_addr()
     );
     set_runtime_state("authenticating");
@@ -581,7 +590,9 @@ async fn run_http_loop(
                     "[PHANTOM] ❌ HTTP auth failed: {} | url={} | host={} | retrying in 5s...",
                     e,
                     auth_url,
-                    config.http_host_header().unwrap_or_else(|| "(default)".to_string())
+                    config
+                        .http_host_header()
+                        .unwrap_or_else(|| "(default)".to_string())
                 );
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
@@ -732,14 +743,8 @@ async fn http_authenticate(
     client: &Client,
     config: &TransportConfig,
 ) -> Result<(String, u32), String> {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let sig = sign_auth(&config.secret, ts);
-
     let url = config.http_request_url("/api/v1/auth/login");
-    let body = AuthRequest { ts, sig };
+    let body = build_auth_request(&config.secret);
     let host_header = config.http_host_header();
     let connect_addr = config.connect_addr();
 
@@ -761,7 +766,12 @@ async fn http_authenticate(
             .text()
             .await
             .ok()
-            .map(|body| body.chars().take(180).collect::<String>().replace('\n', " "))
+            .map(|body| {
+                body.chars()
+                    .take(180)
+                    .collect::<String>()
+                    .replace('\n', " ")
+            })
             .filter(|body| !body.is_empty());
         let mut message = format!(
             "auth failed: status {} | url={} | connect_addr={}",

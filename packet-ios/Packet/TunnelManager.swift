@@ -53,6 +53,9 @@ final class TunnelManager: ObservableObject {
     }
 
     @Published var configuration = TunnelConfiguration()
+    @Published private(set) var savedConfigurations: [SavedTunnelConfiguration] = []
+    @Published private(set) var selectedConfigurationID: UUID?
+    @Published private(set) var activeConfigurationID: UUID?
     @Published private(set) var state: State = .idle
     @Published private(set) var lastResult = "Not started"
     @Published private(set) var telemetry = TunnelTelemetry.empty
@@ -63,6 +66,8 @@ final class TunnelManager: ObservableObject {
     private var statusObserver: NSObjectProtocol?
     private var statsRefreshTask: Task<Void, Never>?
     private var rateAnchor: RuntimeRateAnchor?
+    private var activeConfigurationSnapshot: TunnelConfiguration?
+    private var activeConfigurationName: String?
 
     init(logManager: LogManager = .shared) {
         self.logManager = logManager
@@ -98,6 +103,41 @@ final class TunnelManager: ObservableObject {
         isRunning ? "Disconnect Tunnel" : "Connect Tunnel"
     }
 
+    var selectedConfiguration: SavedTunnelConfiguration? {
+        guard let selectedConfigurationID else { return nil }
+        return savedConfigurations.first { $0.id == selectedConfigurationID }
+    }
+
+    var activeConfiguration: SavedTunnelConfiguration? {
+        guard let activeConfigurationID else { return nil }
+        return savedConfigurations.first { $0.id == activeConfigurationID }
+    }
+
+    var displayConfiguration: TunnelConfiguration {
+        if (isRunning || telemetry.snapshot.tunnelActive), let activeConfigurationSnapshot {
+            return activeConfigurationSnapshot
+        }
+
+        return configuration
+    }
+
+    var selectedConfigurationDisplayName: String {
+        selectedConfiguration?.displayName
+            ?? (configuration.isEmpty ? "No Configuration" : configuration.suggestedName)
+    }
+
+    var activeConfigurationDisplayName: String? {
+        activeConfigurationName ?? activeConfiguration?.displayName
+    }
+
+    var hasPendingSelectedConfiguration: Bool {
+        guard (isRunning || telemetry.snapshot.tunnelActive), let activeConfigurationID else {
+            return false
+        }
+
+        return selectedConfigurationID != activeConfigurationID
+    }
+
     func toggleTunnel() {
         if isRunning {
             stopTunnel()
@@ -115,6 +155,58 @@ final class TunnelManager: ObservableObject {
         guard state == .failed else { return }
         state = .idle
         lastResult = "Packet is idle"
+    }
+
+    func selectConfiguration(id: UUID) {
+        guard let configuration = savedConfigurations.first(where: { $0.id == id }) else { return }
+
+        selectedConfigurationID = id
+        self.configuration = configuration.configuration
+        persistConfigurationListState()
+    }
+
+    func addConfiguration(named name: String, configuration: TunnelConfiguration) {
+        let savedConfiguration = SavedTunnelConfiguration(name: name, configuration: configuration)
+        savedConfigurations.append(savedConfiguration)
+        selectedConfigurationID = savedConfiguration.id
+        self.configuration = configuration
+        persistConfigurationListState()
+    }
+
+    func updateConfiguration(id: UUID, name: String, configuration: TunnelConfiguration) {
+        guard let index = savedConfigurations.firstIndex(where: { $0.id == id }) else { return }
+
+        savedConfigurations[index].name = name
+        savedConfigurations[index].configuration = configuration
+
+        if selectedConfigurationID == id {
+            self.configuration = configuration
+        }
+
+        persistConfigurationListState()
+    }
+
+    func deleteConfiguration(id: UUID) {
+        savedConfigurations.removeAll { $0.id == id }
+
+        if selectedConfigurationID == id {
+            if let first = savedConfigurations.first {
+                selectConfiguration(id: first.id)
+            } else {
+                selectedConfigurationID = nil
+                self.configuration = TunnelConfiguration()
+                persistConfigurationListState()
+            }
+        } else {
+            persistConfigurationListState()
+        }
+    }
+
+    func deleteConfigurations(at offsets: IndexSet) {
+        let idsToDelete = offsets.map { savedConfigurations[$0].id }
+        for id in idsToDelete {
+            deleteConfiguration(id: id)
+        }
     }
 
     func startTunnel() {
@@ -143,6 +235,7 @@ final class TunnelManager: ObservableObject {
                 try await saveToPreferences(manager)
                 try await loadFromPreferences(manager)
 
+                markConfigurationAsActive()
                 providerManager = manager
                 try manager.connection.startVPNTunnel()
                 logManager.appendLog("[APP] Start requested through NetworkExtension")
@@ -170,7 +263,7 @@ final class TunnelManager: ObservableObject {
         do {
             let manager = try await loadOrCreateManager()
             providerManager = manager
-            applyPersistedConfiguration(from: manager)
+            loadConfigurationState(from: manager)
             apply(manager.connection.status)
             await refreshRuntimeStats()
         } catch {
@@ -331,15 +424,89 @@ final class TunnelManager: ObservableObject {
         }) ?? NETunnelProviderManager()
     }
 
-    private func applyPersistedConfiguration(from manager: NETunnelProviderManager) {
+    private func loadConfigurationState(from manager: NETunnelProviderManager) {
+        var configurations = SharedTunnelPreferenceStore.savedConfigurations
+        var selectedConfigurationID = SharedTunnelPreferenceStore.selectedConfigurationID
+        var activeConfigurationID = SharedTunnelPreferenceStore.activeConfigurationID
+        let persistedConfiguration = persistedConfiguration(from: manager)
+
+        if let persistedConfiguration, !persistedConfiguration.isEmpty {
+            if let existingConfiguration = configurations.first(where: { $0.configuration == persistedConfiguration }) {
+                activeConfigurationID = existingConfiguration.id
+                activeConfigurationSnapshot = existingConfiguration.configuration
+                activeConfigurationName = existingConfiguration.displayName
+
+                if selectedConfigurationID == nil {
+                    selectedConfigurationID = existingConfiguration.id
+                }
+            } else {
+                let importedConfiguration = SavedTunnelConfiguration(
+                    name: persistedConfiguration.suggestedName,
+                    configuration: persistedConfiguration
+                )
+                configurations.insert(importedConfiguration, at: 0)
+                activeConfigurationID = importedConfiguration.id
+                activeConfigurationSnapshot = importedConfiguration.configuration
+                activeConfigurationName = importedConfiguration.displayName
+
+                if selectedConfigurationID == nil {
+                    selectedConfigurationID = importedConfiguration.id
+                }
+            }
+        } else {
+            activeConfigurationSnapshot = nil
+            activeConfigurationName = nil
+        }
+
+        if let resolvedSelectedConfigurationID = selectedConfigurationID,
+            !configurations.contains(where: { $0.id == resolvedSelectedConfigurationID })
+        {
+            selectedConfigurationID = nil
+        }
+
+        if let resolvedActiveConfigurationID = activeConfigurationID,
+            !configurations.contains(where: { $0.id == resolvedActiveConfigurationID })
+        {
+            activeConfigurationID = nil
+        }
+
+        self.savedConfigurations = configurations
+        self.selectedConfigurationID = selectedConfigurationID ?? configurations.first?.id
+        self.activeConfigurationID = activeConfigurationID
+
+        if let selectedConfiguration {
+            configuration = selectedConfiguration.configuration
+        } else if let persistedConfiguration {
+            configuration = persistedConfiguration
+        } else {
+            configuration = TunnelConfiguration()
+        }
+
+        persistConfigurationListState()
+    }
+
+    private func persistedConfiguration(from manager: NETunnelProviderManager) -> TunnelConfiguration? {
         guard
             let tunnelProtocol = manager.protocolConfiguration as? NETunnelProviderProtocol,
             let providerConfiguration = tunnelProtocol.providerConfiguration
         else {
-            return
+            return nil
         }
 
-        configuration = TunnelConfiguration(providerConfiguration: providerConfiguration)
+        return TunnelConfiguration(providerConfiguration: providerConfiguration)
+    }
+
+    private func markConfigurationAsActive() {
+        activeConfigurationID = selectedConfigurationID
+        activeConfigurationSnapshot = configuration
+        activeConfigurationName = selectedConfiguration?.displayName ?? configuration.suggestedName
+        persistConfigurationListState()
+    }
+
+    private func persistConfigurationListState() {
+        SharedTunnelPreferenceStore.setSavedConfigurations(savedConfigurations)
+        SharedTunnelPreferenceStore.setSelectedConfigurationID(selectedConfigurationID)
+        SharedTunnelPreferenceStore.setActiveConfigurationID(activeConfigurationID)
     }
 
     private func applyConfiguration(to manager: NETunnelProviderManager) {

@@ -14,6 +14,7 @@ use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -131,15 +132,10 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<Frame>, &'static str> {
         if pos + 7 > data.len() {
             return Err("truncated frame header");
         }
-        let stream_id = u32::from_le_bytes([
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ]);
+        let stream_id =
+            u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         let cmd = Cmd::from_u8(data[pos + 4]).ok_or("invalid command")?;
-        let data_len =
-            u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
+        let data_len = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
         pos += 7;
 
         if pos + data_len > data.len() {
@@ -161,8 +157,7 @@ pub fn decode_frames(data: &[u8]) -> Result<Vec<Frame>, &'static str> {
 
 /// Derive a 32-byte encryption key from the shared secret using HMAC.
 pub fn derive_key(secret: &str) -> [u8; 32] {
-    let mut mac =
-        <HmacSha256 as Mac>::new_from_slice(b"phantom-tunnel-key-derivation").unwrap();
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(b"phantom-tunnel-key-derivation").unwrap();
     mac.update(secret.as_bytes());
     let result = mac.finalize().into_bytes();
     let mut key = [0u8; 32];
@@ -198,18 +193,51 @@ pub fn decrypt(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>, &'static str> {
 
 // ─── Authentication ────────────────────────────────────────────
 
-/// Generate an authentication signature for the given timestamp.
-pub fn sign_auth(secret: &str, timestamp: u64) -> String {
+fn auth_mac(secret: &str, timestamp: u64, nonce: &str) -> HmacSha256 {
     let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(timestamp.to_string().as_bytes());
-    hex::encode(&mac.finalize().into_bytes())
+    mac.update(b":");
+    mac.update(nonce.as_bytes());
+    mac
+}
+
+/// Generate an authentication signature for the given timestamp + nonce pair.
+pub fn sign_auth(secret: &str, timestamp: u64, nonce: &str) -> String {
+    hex::encode(&auth_mac(secret, timestamp, nonce).finalize().into_bytes())
 }
 
 /// Verify an authentication signature.
-pub fn verify_auth(secret: &str, timestamp: u64, signature: &str) -> bool {
-    let expected = sign_auth(secret, timestamp);
-    // Constant-time comparison via HMAC verify
-    expected == signature
+pub fn verify_auth(secret: &str, timestamp: u64, nonce: &str, signature: &str) -> bool {
+    if nonce.is_empty() {
+        return false;
+    }
+
+    let signature_bytes = match hex::decode(signature) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+
+    auth_mac(secret, timestamp, nonce)
+        .verify_slice(&signature_bytes)
+        .is_ok()
+}
+
+/// Generate a random authentication nonce to prevent replay.
+pub fn generate_auth_nonce() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    hex::encode(&bytes)
+}
+
+/// Build an auth request with a fresh timestamp + nonce.
+pub fn build_auth_request(secret: &str) -> AuthRequest {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let n = generate_auth_nonce();
+    let sig = sign_auth(secret, ts, &n);
+    AuthRequest { ts, n, sig }
 }
 
 /// Generate a random session token.
@@ -227,6 +255,9 @@ pub fn generate_session_token() -> String {
 pub struct AuthRequest {
     /// Unix timestamp
     pub ts: u64,
+    /// Per-request nonce to prevent auth replay
+    #[serde(default)]
+    pub n: String,
     /// HMAC-SHA256 signature
     pub sig: String,
 }
@@ -254,6 +285,34 @@ pub struct SyncResponse {
 mod hex {
     pub fn encode(data: &[u8]) -> String {
         data.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    pub fn decode(value: &str) -> Result<Vec<u8>, &'static str> {
+        if value.len() % 2 != 0 {
+            return Err("invalid hex");
+        }
+
+        let mut decoded = Vec::with_capacity(value.len() / 2);
+        let bytes = value.as_bytes();
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            let high = decode_nibble(bytes[index])?;
+            let low = decode_nibble(bytes[index + 1])?;
+            decoded.push((high << 4) | low);
+            index += 2;
+        }
+
+        Ok(decoded)
+    }
+
+    fn decode_nibble(byte: u8) -> Result<u8, &'static str> {
+        match byte {
+            b'0'..=b'9' => Ok(byte - b'0'),
+            b'a'..=b'f' => Ok(byte - b'a' + 10),
+            b'A'..=b'F' => Ok(byte - b'A' + 10),
+            _ => Err("invalid hex"),
+        }
     }
 }
 
@@ -341,8 +400,11 @@ mod tests {
     fn test_auth() {
         let secret = "my-secret";
         let ts = 1234567890u64;
-        let sig = sign_auth(secret, ts);
-        assert!(verify_auth(secret, ts, &sig));
-        assert!(!verify_auth(secret, ts + 1, &sig));
+        let nonce = "6d5cc6b7cbbd4b4ab7a6fc907f9455c1";
+        let sig = sign_auth(secret, ts, nonce);
+        assert!(verify_auth(secret, ts, nonce, &sig));
+        assert!(!verify_auth(secret, ts + 1, nonce, &sig));
+        assert!(!verify_auth(secret, ts, "different", &sig));
+        assert!(!verify_auth(secret, ts, "", &sig));
     }
 }

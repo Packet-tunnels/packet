@@ -369,7 +369,7 @@ pub mod android {
     use super::*;
     use jni::errors::LogErrorAndDefault;
     use jni::objects::{JClass, JObject};
-    use jni::sys::{jint, jstring};
+    use jni::sys::{jboolean, jint, jstring};
     use jni::{objects::JString, EnvUnowned};
 
     #[no_mangle]
@@ -524,6 +524,8 @@ pub mod android {
         host_override: JString,
         sni_override: JString,
         transport_mode: jint,
+        fragment_enabled: jboolean,
+        fragment_size: jint,
     ) -> jint {
         env.with_env(|env| -> JniResult<jint> {
             let url = server_url.try_to_string(env)?;
@@ -559,8 +561,8 @@ pub mod android {
                 cdn_edge: edge,
                 host_override: host,
                 sni_override: sni,
-                fragment: false,    // <-- REVERTED: Fragmenting TLS to a WAF often triggers Slowloris protection
-                fragment_size: 40,
+                fragment: fragment_enabled != 0,
+                fragment_size: fragment_size as usize,
                 padding: true,
             };
 
