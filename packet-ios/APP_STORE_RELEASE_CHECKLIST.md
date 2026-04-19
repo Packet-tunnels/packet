@@ -35,3 +35,36 @@ Manual items still required in App Store Connect or during review:
 Known product caveat:
 
 - The current iOS implementation uses a packet tunnel extension in proxy-routed mode. Keep the product description and App Review Notes accurate; do not describe it as a full raw-packet VPN unless packetFlow routing is implemented.
+
+Suggested public URLs for App Store Connect once GitHub Pages is enabled on `Packet-tunnels/packet-public`:
+
+- Support URL: `https://packet-tunnels.github.io/packet-public/`
+- Privacy Policy URL: `https://packet-tunnels.github.io/packet-public/privacy.html`
+
+Why these are acceptable:
+
+- The homepage already includes a support section and contact email.
+- The privacy page already includes a standalone privacy policy and support contact.
+
+GitHub Pages setup for `packet-public`:
+
+1. Push the `packet-public` repository to GitHub.
+2. Open the `Packet-tunnels/packet-public` repository on GitHub.
+3. Go to `Settings` → `Pages`.
+4. Set `Build and deployment` → `Source` to `Deploy from a branch`.
+5. Select branch `main` and folder `/(root)`.
+6. Save and wait for Pages to publish.
+7. Open the homepage and privacy URLs above and verify they load publicly over HTTPS.
+
+Minimum TestFlight sequence:
+
+1. Regenerate the Xcode project with XcodeGen after any file split or source change.
+2. Build the Rust iOS static libraries.
+3. Archive the `Packet` app in Xcode using a distribution signing identity that includes the Network Extension capability for both targets.
+4. Upload the archive to App Store Connect.
+5. In App Store Connect, set the Support URL and Privacy Policy URL.
+6. Complete App Privacy answers and publish them.
+7. Complete export compliance for the uploaded build if prompted.
+8. Add TestFlight test information, including the feedback email and beta description.
+9. Create an internal testing group and add the uploaded build.
+10. Only after internal validation, create an external testing group if needed.

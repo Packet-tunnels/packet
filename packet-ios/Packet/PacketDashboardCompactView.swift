@@ -13,9 +13,17 @@ struct PacketDashboardCompactView: View {
                 complianceStore: complianceStore
             )
             .tabItem {
-                Label("Overview", systemImage: "wave.3.right.circle")
+                Label("Status", systemImage: tunnelManager.isRunning ? "checkmark.shield.fill" : "shield")
             }
             .tag(0)
+
+            PacketServersView(
+                tunnelManager: tunnelManager
+            )
+            .tabItem {
+                Label("Servers", systemImage: "server.rack")
+            }
+            .tag(1)
 
             PacketSettingsView(
                 tunnelManager: tunnelManager,
@@ -24,7 +32,7 @@ struct PacketDashboardCompactView: View {
             .tabItem {
                 Label("Settings", systemImage: "slider.horizontal.3")
             }
-            .tag(1)
+            .tag(2)
         }
         .tabViewStyle(.automatic)
     }
