@@ -16,9 +16,10 @@
 // 4. ArvanCloud specifically supports WebSocket forwarding
 
 use crate::{
-    dispatch_downstream, fragment::FragmentStream, process_upstream_msg, set_runtime_connected,
-    set_runtime_last_error, set_runtime_ping, set_runtime_state, TunnelState, UpstreamMsg,
+    dispatch_downstream, mesh, process_upstream_msg, set_runtime_connected, set_runtime_last_error,
+    set_runtime_ping, set_runtime_state, tls_fragment::FragmentStream, TunnelState, UpstreamMsg,
 };
+use webpki::EndEntityCert;
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
 use reqwest::header::HOST;
@@ -30,12 +31,19 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::rustls::{ClientConfig as RustlsClientConfig, RootCertStore};
+use tokio_rustls::rustls::client::danger::{
+    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+};
+use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio_rustls::rustls::{
+    client::WebPkiServerVerifier,
+    CertificateError, ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore,
+    SignatureScheme,
+};
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 // ─── Transport Configuration ──────────────────────────────────
 
@@ -50,6 +58,7 @@ pub enum TransportMode {
 pub struct TransportConfig {
     pub server_url: String,
     pub secret: String,
+    pub auth_ticket: Option<String>,
     pub key: [u8; 32],
     pub mode: TransportMode,
     /// Custom Host header for CDN mode (e.g., "piano-lessons.site")
@@ -62,6 +71,8 @@ pub struct TransportConfig {
     pub fragment_enabled: bool,
     /// Fragment chunk size in bytes
     pub fragment_size: usize,
+    /// SPKI SHA-256 pins for the selected bridge descriptor
+    pub spki_pins: Vec<String>,
 }
 
 impl TransportConfig {
@@ -192,6 +203,118 @@ impl TransportConfig {
             self.host_value()
         }
     }
+}
+
+#[derive(Debug)]
+struct PinnedServerCertVerifier {
+    inner: Arc<WebPkiServerVerifier>,
+    spki_pins: Vec<String>,
+}
+
+impl PinnedServerCertVerifier {
+    fn new(inner: Arc<WebPkiServerVerifier>, pins: &[String]) -> Result<Self, String> {
+        let spki_pins = normalize_spki_pins(pins);
+        if spki_pins.is_empty() {
+            return Err("packet bridge SPKI pins missing".to_string());
+        }
+
+        Ok(Self { inner, spki_pins })
+    }
+
+    fn verify_spki_pin(&self, end_entity: &CertificateDer<'_>) -> Result<(), tokio_rustls::rustls::Error> {
+        let parsed = EndEntityCert::try_from(end_entity).map_err(|_| {
+            tokio_rustls::rustls::Error::InvalidCertificate(CertificateError::BadEncoding)
+        })?;
+        let actual_pin = b64_encode(&sha256(parsed.subject_public_key_info().as_ref()));
+
+        if self.spki_pins.iter().any(|expected| expected == &actual_pin) {
+            Ok(())
+        } else {
+            Err(tokio_rustls::rustls::Error::InvalidCertificate(
+                CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+}
+
+impl ServerCertVerifier for PinnedServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
+        self.inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        self.verify_spki_pin(end_entity)?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, tokio_rustls::rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+fn normalize_spki_pins(pins: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for pin in pins {
+        let trimmed = pin.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let value = trimmed
+            .strip_prefix("sha256/")
+            .or_else(|| trimmed.strip_prefix("SHA256/"))
+            .unwrap_or(trimmed)
+            .trim();
+
+        if !value.is_empty() && !normalized.iter().any(|existing| existing == value) {
+            normalized.push(value.to_string());
+        }
+    }
+    normalized
+}
+
+fn build_tls_client_config(config: &TransportConfig) -> Result<RustlsClientConfig, String> {
+    let mut root_store = RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    if config.spki_pins.is_empty() {
+        return Ok(RustlsClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth());
+    }
+
+    let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
+        .build()
+        .map_err(|error| format!("packet bridge verifier init failed: {}", error))?;
+    let verifier = Arc::new(PinnedServerCertVerifier::new(verifier, &config.spki_pins)?);
+
+    Ok(RustlsClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth())
 }
 
 // ─── Transport Runner ──────────────────────────────────────────
@@ -329,12 +452,13 @@ async fn ws_session(
     if config.is_tls() {
         let sni = config.sni_value();
         info!("[PHANTOM] Starting TLS handshake. SNI: {}", sni);
-
-        let mut root_store = RootCertStore::empty();
-        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls_config = RustlsClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+        if !config.spki_pins.is_empty() {
+            info!(
+                "[PHANTOM] Bridge SPKI pinning enabled ({} pins)",
+                normalize_spki_pins(&config.spki_pins).len()
+            );
+        }
+        let tls_config = build_tls_client_config(config)?;
 
         // For custom CDNs or tunnels, we might not want to verify the destination IP strictly
         // For production we'd want custom verifiers, but standard works for Cloudflare
@@ -412,7 +536,7 @@ where
     let key = config.key;
 
     // ── Authenticate ──
-    let auth_request = build_auth_request(&config.secret);
+    let auth_request = build_transport_auth_request(config, Some("mesh_client"));
     let auth_json = serde_json::to_string(&auth_request)?;
 
     info!("[PHANTOM] Sending auth (ts={})...", auth_request.ts);
@@ -455,6 +579,8 @@ where
                 "[PHANTOM] ✓ Authenticated — session: {}...",
                 &token[..token.len().min(16)]
             );
+            mesh::set_status("connected");
+            mesh::clear_last_error();
             let ping_ms = started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
             set_runtime_connected(Some(ping_ms));
         }
@@ -487,6 +613,25 @@ where
                             process_upstream_msg(msg, &mut frames, tunnel_state).await;
                         }
 
+                        let relay_frames = mesh::drain_relay_frames();
+                        for relay in relay_frames {
+                            let queue_latency_ms =
+                                relay.received_at.elapsed().as_millis().min(u64::MAX as u128)
+                                    as u64;
+                            mesh::record_relay_success(
+                                &relay.next_peer_id,
+                                queue_latency_ms,
+                            );
+                            debug!(
+                                "[PHANTOM] Queuing relay frame for peer {} ({}B)",
+                                relay.next_peer_id,
+                                relay.payload.len()
+                            );
+                            // Until peer-target metadata is represented as a first-class protocol
+                            // frame, ship the peeled onion payload over the relay command itself.
+                            frames.push(Frame::relay(0, relay.payload));
+                        }
+
                         if !frames.is_empty() {
                             let plaintext = encode_frames(&frames);
                             let encrypted = encrypt(&key, &plaintext);
@@ -509,7 +654,17 @@ where
                             Ok(plaintext) => {
                                 match decode_frames(&plaintext) {
                                     Ok(frames) => {
-                                        dispatch_downstream(frames, tunnel_state).await;
+                                        let mut app_frames = Vec::new();
+                                        for frame in frames {
+                                            if frame.cmd == Cmd::Relay {
+                                                if let Some(inner) = mesh::process_relay_fragment(&frame.data) {
+                                                    debug!("[PHANTOM] Received final-hop mesh fragment payload: {}B", inner.len());
+                                                }
+                                            } else {
+                                                app_frames.push(frame);
+                                            }
+                                        }
+                                        dispatch_downstream(app_frames, tunnel_state).await;
                                     }
                                     Err(e) => {
                                         error!("[PHANTOM] Frame decode error: {} ({}B data)", e, plaintext.len());
@@ -524,12 +679,15 @@ where
                     Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => continue,
                     Some(Ok(Message::Close(reason))) => {
                         info!("[PHANTOM] WebSocket closed by server: {:?}", reason);
+                        mesh::set_status("disconnected");
                         return Ok(());
                     }
                     Some(Err(e)) => {
+                        mesh::set_last_error(e.to_string());
                         return Err(format!("WS receive error: {} (CDN timeout or network drop)", e).into());
                     }
                     None => {
+                        mesh::set_status("disconnected");
                         return Err("WebSocket stream ended unexpectedly (CDN or server closed connection)".into());
                     }
                     _ => continue,
@@ -557,6 +715,28 @@ async fn run_http_loop(
         .pool_max_idle_per_host(4)
         .timeout(Duration::from_secs(30));
 
+    if config.is_tls() {
+        match build_tls_client_config(&config) {
+            Ok(tls_config) => {
+                if !config.spki_pins.is_empty() {
+                    info!(
+                        "[PHANTOM] HTTP bridge SPKI pinning enabled ({} pins)",
+                        normalize_spki_pins(&config.spki_pins).len()
+                    );
+                }
+                client_builder = client_builder.use_preconfigured_tls(tls_config);
+            }
+            Err(error) => {
+                mesh::set_status("failed");
+                mesh::set_last_error(error.clone());
+                set_runtime_state("failed");
+                set_runtime_last_error(error.clone());
+                error!("[PHANTOM] ❌ {}", error);
+                return;
+            }
+        }
+    }
+
     if let Some((request_host, connect_addr)) = config.http_resolve_override() {
         info!(
             "[PHANTOM] HTTP resolve override: {} -> {}",
@@ -581,10 +761,14 @@ async fn run_http_loop(
     let token = loop {
         match http_authenticate(&http_client, &config).await {
             Ok((t, ping_ms)) => {
+                mesh::set_status("connected");
+                mesh::clear_last_error();
                 set_runtime_connected(Some(ping_ms));
                 break t;
             }
             Err(e) => {
+                mesh::set_status("degraded");
+                mesh::set_last_error(e.clone());
                 set_runtime_last_error(e.clone());
                 error!(
                     "[PHANTOM] ❌ HTTP auth failed: {} | url={} | host={} | retrying in 5s...",
@@ -723,12 +907,14 @@ async fn run_http_loop(
             }
             Err(e) => {
                 set_runtime_state("degraded");
+                mesh::set_status("degraded");
                 let message = describe_reqwest_error(
                     &e,
                     &sync_url,
                     config.http_host_header().as_deref(),
                     &config.connect_addr(),
                 );
+                mesh::set_last_error(message.clone());
                 set_runtime_last_error(message.clone());
                 error!("[PHANTOM] ❌ Sync request failed: {}", message);
                 tokio::time::sleep(Duration::from_secs(2)).await;
@@ -744,7 +930,7 @@ async fn http_authenticate(
     config: &TransportConfig,
 ) -> Result<(String, u32), String> {
     let url = config.http_request_url("/api/v1/auth/login");
-    let body = build_auth_request(&config.secret);
+    let body = build_transport_auth_request(config, Some("mesh_client"));
     let host_header = config.http_host_header();
     let connect_addr = config.connect_addr();
 
@@ -797,6 +983,18 @@ async fn http_authenticate(
         .as_str()
         .map(|s| (s.to_string(), ping_ms))
         .ok_or_else(|| "no token in response".to_string())
+}
+
+fn build_transport_auth_request(config: &TransportConfig, default_mode: Option<&str>) -> AuthRequest {
+    if let Some(ticket) = config.auth_ticket.as_ref().filter(|ticket| !ticket.trim().is_empty()) {
+        build_ticket_auth_request(
+            ticket.clone(),
+            default_mode.map(|mode| mode.to_string()),
+            None,
+        )
+    } else {
+        build_auth_request(&config.secret)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -908,4 +1106,24 @@ fn describe_reqwest_error(
     }
 
     details.join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_spki_pins;
+
+    #[test]
+    fn normalize_spki_pins_strips_prefixes_and_deduplicates() {
+        let pins = vec![
+            "sha256/abc123=".to_string(),
+            " abc123= ".to_string(),
+            "SHA256/def456=".to_string(),
+            "".to_string(),
+        ];
+
+        assert_eq!(
+            normalize_spki_pins(&pins),
+            vec!["abc123=".to_string(), "def456=".to_string()]
+        );
+    }
 }

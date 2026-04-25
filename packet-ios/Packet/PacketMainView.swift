@@ -375,20 +375,29 @@ struct PacketVPNDisclosureSheet: View {
     let acceptTitle: String
     let onAccept: () -> Void
     let onDismiss: () -> Void
+    
+    @Environment(\.colorScheme) var colorScheme
+    @State private var isAcknowledged = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 24) {
                         VStack(alignment: .leading, spacing: 12) {
-                            Label("VPN Data-Use Disclosure", systemImage: "checkmark.shield.fill")
-                                .font(.system(size: 18, weight: .semibold))
+                            Image(systemName: "checkmark.shield.fill")
+                                .font(.system(size: 44))
+                                .foregroundStyle(Color.green)
+                                .padding(.bottom, 8)
+
+                            Text("VPN Data-Use Disclosure")
+                                .font(.system(size: 24, weight: .bold))
                                 .foregroundStyle(.primary)
 
                             Text(PacketComplianceCopy.disclosureIntro)
-                                .font(.system(size: 14))
+                                .font(.system(size: 15))
                                 .foregroundStyle(.secondary)
+                                .lineSpacing(2)
                         }
 
                         VStack(spacing: 12) {
@@ -399,37 +408,72 @@ struct PacketVPNDisclosureSheet: View {
 
                         Text(PacketComplianceCopy.disclosureOutro)
                             .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.horizontal, 24)
-                    .padding(.top, 24)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 32)
                     .padding(.bottom, 20)
                 }
 
-                VStack(spacing: 12) {
-                    Button(action: onAccept) {
-                        Text(acceptTitle)
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(Color.primary)
-                            .foregroundStyle(Color(uiColor: .systemBackground))
-                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                VStack(spacing: 16) {
+                    Button(action: {
+                        let feedback = UIImpactFeedbackGenerator(style: .light)
+                        feedback.impactOccurred()
+                        isAcknowledged.toggle()
+                    }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: isAcknowledged ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 22))
+                                .foregroundStyle(isAcknowledged ? .green : .secondary)
+                            
+                            Text("I have reviewed and understand how my data is handled.")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.leading)
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 4)
+
+                    Button(action: onAccept) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 18, weight: .bold))
+                            
+                            Text(acceptTitle)
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 16)
+                        .background(
+                            isAcknowledged 
+                            ? (colorScheme == .dark ? Color.white : Color.black) 
+                            : Color.secondary.opacity(0.2)
+                        )
+                        .foregroundStyle(
+                            isAcknowledged 
+                            ? (colorScheme == .dark ? Color.black : Color.white) 
+                            : Color.secondary
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .disabled(!isAcknowledged)
 
                     Button(isConnectFlow ? "Not Now" : "Dismiss", action: onDismiss)
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .padding(.top, 4)
                 }
-                .padding(24)
-                .background(Color(uiColor: .systemGroupedBackground))
+                .padding(28)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: -5)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
             .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
     }
 }

@@ -17,10 +17,19 @@ object PhantomTunnel {
     external fun copyStatsJson(): String?
 
     @JvmStatic
+    external fun copyMeshStatsJson(): String?
+
+    @JvmStatic
     external fun stopClient()
 
     @JvmStatic
     external fun startClient(serverUrl: String, secret: String, listenPort: Int): Int
+
+    @JvmStatic
+    external fun startMeshClient(configJson: String, listenPort: Int): Int
+
+    @JvmStatic
+    external fun importMeshPeers(peersJson: String): Int
 
     @JvmStatic
     external fun startClientCdn(

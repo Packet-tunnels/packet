@@ -183,11 +183,17 @@ final class TunnelManager: ObservableObject {
             self.configuration = configuration
         }
 
+        // Save secret to Keychain and then clear it from the configuration in savedConfigurations
+        // to ensure it doesn't leak into UserDefaults.
+        let secret = configuration.secret
+        PacketKeychainStore.shared.save(secret: secret, for: id.uuidString)
+        
         persistConfigurationListState()
     }
 
     func deleteConfiguration(id: UUID) {
         savedConfigurations.removeAll { $0.id == id }
+        PacketKeychainStore.shared.deleteSecret(for: id.uuidString)
 
         if selectedConfigurationID == id {
             if let first = savedConfigurations.first {
@@ -470,6 +476,13 @@ final class TunnelManager: ObservableObject {
             activeConfigurationID = nil
         }
 
+        // Hydrate secrets from Keychain
+        for i in 0..<configurations.count {
+            if let secret = PacketKeychainStore.shared.loadSecret(for: configurations[i].id.uuidString) {
+                configurations[i].configuration.secret = secret
+            }
+        }
+        
         self.savedConfigurations = configurations
         self.selectedConfigurationID = selectedConfigurationID ?? configurations.first?.id
         self.activeConfigurationID = activeConfigurationID
@@ -478,6 +491,12 @@ final class TunnelManager: ObservableObject {
             configuration = selectedConfiguration.configuration
         } else if let persistedConfiguration {
             configuration = persistedConfiguration
+            // Try to load secret for persisted config if possible
+            if let activeId = activeConfigurationID, configuration.secret.isEmpty {
+                if let secret = PacketKeychainStore.shared.loadSecret(for: activeId.uuidString) {
+                    configuration.secret = secret
+                }
+            }
         } else {
             configuration = TunnelConfiguration()
         }
@@ -500,11 +519,28 @@ final class TunnelManager: ObservableObject {
         activeConfigurationID = selectedConfigurationID
         activeConfigurationSnapshot = configuration
         activeConfigurationName = selectedConfiguration?.displayName ?? configuration.suggestedName
+        
+        // Ensure secret is in Keychain if it changed during selection
+        if let id = activeConfigurationID {
+            PacketKeychainStore.shared.save(secret: configuration.secret, for: id.uuidString)
+        }
+        
         persistConfigurationListState()
     }
 
     private func persistConfigurationListState() {
-        SharedTunnelPreferenceStore.setSavedConfigurations(savedConfigurations)
+        // Strip secrets before saving to UserDefaults
+        let scrubbedConfigurations = savedConfigurations.map { saved -> SavedTunnelConfiguration in
+            var scrubbed = saved
+            // Save to keychain before scrubbing just in case it wasn't already there
+            if !scrubbed.configuration.secret.isEmpty {
+                PacketKeychainStore.shared.save(secret: scrubbed.configuration.secret, for: scrubbed.id.uuidString)
+            }
+            scrubbed.configuration.secret = "" 
+            return scrubbed
+        }
+        
+        SharedTunnelPreferenceStore.setSavedConfigurations(scrubbedConfigurations)
         SharedTunnelPreferenceStore.setSelectedConfigurationID(selectedConfigurationID)
         SharedTunnelPreferenceStore.setActiveConfigurationID(activeConfigurationID)
     }

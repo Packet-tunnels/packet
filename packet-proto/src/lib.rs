@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+pub mod fragment;
+pub mod onion;
+
 type HmacSha256 = Hmac<Sha256>;
 
 // ─── Stream Commands ───────────────────────────────────────────
@@ -33,6 +36,12 @@ pub enum Cmd {
     Data = 4,
     /// Bidirectional: close a stream
     Close = 5,
+    /// Bidirectional: relay-control metadata
+    Relay = 6,
+    /// Bidirectional: protocol-level fragment payload
+    Fragment = 7,
+    /// Bidirectional: synthetic cover traffic
+    CoverTraffic = 8,
 }
 
 impl Cmd {
@@ -43,6 +52,9 @@ impl Cmd {
             3 => Some(Self::ConnectErr),
             4 => Some(Self::Data),
             5 => Some(Self::Close),
+            6 => Some(Self::Relay),
+            7 => Some(Self::Fragment),
+            8 => Some(Self::CoverTraffic),
             _ => None,
         }
     }
@@ -95,6 +107,30 @@ impl Frame {
             stream_id,
             cmd: Cmd::Close,
             data: vec![],
+        }
+    }
+
+    pub fn relay(stream_id: u32, payload: Vec<u8>) -> Self {
+        Self {
+            stream_id,
+            cmd: Cmd::Relay,
+            data: payload,
+        }
+    }
+
+    pub fn fragment(stream_id: u32, payload: Vec<u8>) -> Self {
+        Self {
+            stream_id,
+            cmd: Cmd::Fragment,
+            data: payload,
+        }
+    }
+
+    pub fn cover(stream_id: u32, payload: Vec<u8>) -> Self {
+        Self {
+            stream_id,
+            cmd: Cmd::CoverTraffic,
+            data: payload,
         }
     }
 }
@@ -237,7 +273,29 @@ pub fn build_auth_request(secret: &str) -> AuthRequest {
         .as_secs();
     let n = generate_auth_nonce();
     let sig = sign_auth(secret, ts, &n);
-    AuthRequest { ts, n, sig }
+    AuthRequest {
+        ts,
+        n,
+        sig,
+        ticket: None,
+        mode: None,
+        label: None,
+    }
+}
+
+pub fn build_ticket_auth_request(
+    ticket: impl Into<String>,
+    mode: Option<String>,
+    label: Option<String>,
+) -> AuthRequest {
+    AuthRequest {
+        ts: unix_now_secs(),
+        n: generate_auth_nonce(),
+        sig: String::new(),
+        ticket: Some(ticket.into()),
+        mode,
+        label,
+    }
 }
 
 /// Generate a random session token.
@@ -259,7 +317,15 @@ pub struct AuthRequest {
     #[serde(default)]
     pub n: String,
     /// HMAC-SHA256 signature
+    #[serde(default)]
     pub sig: String,
+    /// Short-lived signed transport ticket
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -279,6 +345,154 @@ pub struct SyncRequest {
 pub struct SyncResponse {
     /// Base64-encoded encrypted tunnel message
     pub d: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TransportTicketClaims {
+    pub sub: String,
+    pub iat: u64,
+    pub exp: u64,
+    pub jti: String,
+    pub session_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bridge_id: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+impl TransportTicketClaims {
+    pub fn session_key_bytes(&self) -> Result<[u8; 32], &'static str> {
+        let bytes = b64_decode(&self.session_key)?;
+        if bytes.len() != 32 {
+            return Err("invalid ticket session key length");
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        Ok(key)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PacketBridgeDescriptor {
+    pub id: String,
+    pub base_url: String,
+    #[serde(default)]
+    pub spki_pins: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct PacketPeerDescriptor {
+    pub peer_id: String,
+    #[serde(default)]
+    pub relay_urls: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_score: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<u64>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MeshBootstrapConfig {
+    pub ticket: String,
+    #[serde(default)]
+    pub bridges: Vec<PacketBridgeDescriptor>,
+    #[serde(default)]
+    pub peers: Vec<PacketPeerDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_bridge_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MeshStatsSnapshot {
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_bridge_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_port: Option<u16>,
+    #[serde(default)]
+    pub known_peers: usize,
+    #[serde(default)]
+    pub trusted_peers: usize,
+    #[serde(default)]
+    pub imported_bridges: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+pub fn issue_transport_ticket(
+    secret: &str,
+    subject: &str,
+    ttl_secs: u64,
+    bridge_id: Option<String>,
+    capabilities: Vec<String>,
+) -> String {
+    let now = unix_now_secs();
+    let mut session_key = [0u8; 32];
+    OsRng.fill_bytes(&mut session_key);
+    let claims = TransportTicketClaims {
+        sub: subject.to_string(),
+        iat: now,
+        exp: now.saturating_add(ttl_secs.max(1)),
+        jti: generate_auth_nonce(),
+        session_key: b64_encode(&session_key),
+        bridge_id,
+        capabilities,
+    };
+    sign_transport_ticket(secret, &claims)
+}
+
+pub fn sign_transport_ticket(secret: &str, claims: &TransportTicketClaims) -> String {
+    let payload = serde_json::to_vec(claims).expect("ticket claims serialization failed");
+    let encoded_payload = b64_encode(&payload);
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(encoded_payload.as_bytes());
+    let signature = hex::encode(&mac.finalize().into_bytes());
+    format!("{}.{}", encoded_payload, signature)
+}
+
+pub fn decode_transport_ticket(token: &str) -> Result<TransportTicketClaims, &'static str> {
+    let (payload, _sig) = split_transport_ticket(token)?;
+    let decoded_payload = b64_decode(payload)?;
+    serde_json::from_slice(&decoded_payload).map_err(|_| "invalid transport ticket payload")
+}
+
+pub fn verify_transport_ticket(
+    secret: &str,
+    token: &str,
+    now: u64,
+) -> Result<TransportTicketClaims, &'static str> {
+    let (payload, signature) = split_transport_ticket(token)?;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(payload.as_bytes());
+    let signature_bytes = hex::decode(signature)?;
+    mac.verify_slice(&signature_bytes)
+        .map_err(|_| "invalid transport ticket signature")?;
+
+    let claims = decode_transport_ticket(token)?;
+    if claims.exp <= now {
+        return Err("transport ticket expired");
+    }
+    if claims.iat > now.saturating_add(30) {
+        return Err("transport ticket issued in the future");
+    }
+    let _ = claims.session_key_bytes()?;
+    Ok(claims)
+}
+
+fn split_transport_ticket(token: &str) -> Result<(&str, &str), &'static str> {
+    token
+        .split_once('.')
+        .ok_or("invalid transport ticket format")
 }
 
 // ─── Hex helpers (minimal, to avoid another dep) ───────────────
@@ -316,6 +530,15 @@ mod hex {
     }
 }
 
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+
+    let digest = Sha256::digest(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
 // ─── Base64 helpers ────────────────────────────────────────────
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -326,6 +549,13 @@ pub fn b64_encode(data: &[u8]) -> String {
 
 pub fn b64_decode(s: &str) -> Result<Vec<u8>, &'static str> {
     B64.decode(s).map_err(|_| "invalid base64")
+}
+
+pub fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 // ─── Traffic Padding ───────────────────────────────────────────
@@ -406,5 +636,97 @@ mod tests {
         assert!(!verify_auth(secret, ts + 1, nonce, &sig));
         assert!(!verify_auth(secret, ts, "different", &sig));
         assert!(!verify_auth(secret, ts, "", &sig));
+    }
+
+    #[test]
+    fn test_ticket_roundtrip_and_expiry() {
+        let secret = "mesh-secret";
+        let ticket = issue_transport_ticket(
+            secret,
+            "user-123",
+            60,
+            Some("bridge-1".to_string()),
+            vec!["mesh".to_string()],
+        );
+        let claims = verify_transport_ticket(secret, &ticket, unix_now_secs()).unwrap();
+        assert_eq!(claims.sub, "user-123");
+        assert_eq!(claims.bridge_id.as_deref(), Some("bridge-1"));
+        assert_eq!(claims.capabilities, vec!["mesh".to_string()]);
+        assert_eq!(claims.session_key_bytes().unwrap().len(), 32);
+
+        let expired = TransportTicketClaims {
+            sub: "user-123".to_string(),
+            iat: 10,
+            exp: 20,
+            jti: "expired".to_string(),
+            session_key: b64_encode(&[7u8; 32]),
+            bridge_id: None,
+            capabilities: vec![],
+        };
+        let expired_token = sign_transport_ticket(secret, &expired);
+        assert_eq!(
+            verify_transport_ticket(secret, &expired_token, 30).unwrap_err(),
+            "transport ticket expired"
+        );
+    }
+
+    #[test]
+    fn test_onion_wrap_and_peel() {
+        let payload = b"vibe-packet";
+        let hop1 = derive_key("hop-1");
+        let hop2 = derive_key("hop-2");
+        let wrapped = onion::onion_wrap(payload, &[hop1, hop2]);
+        let (remaining_1, first) = onion::onion_peel(&wrapped, &hop1).unwrap();
+        let (remaining_2, second) = onion::onion_peel(&first, &hop2).unwrap();
+        assert_eq!(remaining_1, 2);
+        assert_eq!(remaining_2, 1);
+        assert_eq!(second, payload);
+    }
+
+    #[test]
+    fn test_k_of_n_fragment_reconstruction_and_corruption_handling() {
+        let fragments = fragment::split_secret_shares(b"mesh-data", 3, 5).unwrap();
+        let recovered = fragment::reconstruct_secret(&[
+            fragments[0].clone(),
+            fragments[2].clone(),
+            fragments[4].clone(),
+        ])
+        .unwrap();
+        assert_eq!(recovered, b"mesh-data");
+
+        let mut corrupted = fragments[1].clone();
+        corrupted.share_data[0] ^= 0x7f;
+        let recovered_with_fallback = fragment::reconstruct_secret(&[
+            fragments[0].clone(),
+            corrupted,
+            fragments[2].clone(),
+            fragments[3].clone(),
+        ])
+        .unwrap();
+        assert_eq!(recovered_with_fallback, b"mesh-data");
+    }
+
+    #[test]
+    fn test_fragment_padding_roundtrips_to_standard_size() {
+        let fragment = fragment::split_secret_shares(b"voice-note", 2, 3)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let padded = fragment.to_padded_bytes();
+        assert!(fragment::STANDARD_SIZES.contains(&padded.len()));
+        let decoded = fragment::KOfNFragment::from_padded_bytes(&padded).unwrap();
+        assert_eq!(decoded, fragment);
+    }
+
+    #[test]
+    fn test_fragment_rejects_duplicate_share_indices() {
+        let fragments = fragment::split_secret_shares(b"small-image", 2, 3).unwrap();
+        let error = fragment::reconstruct_secret(&[
+            fragments[0].clone(),
+            fragments[0].clone(),
+        ])
+        .unwrap_err();
+        assert_eq!(error, "duplicate fragment share index");
     }
 }

@@ -95,6 +95,7 @@ impl AppState {
 }
 
 struct Session {
+    key: [u8; 32],
     writers: Mutex<HashMap<u32, OwnedWriteHalf>>,
     downstream_tx: mpsc::Sender<Frame>,
     downstream_rx: Mutex<mpsc::Receiver<Frame>>,
@@ -102,9 +103,10 @@ struct Session {
 }
 
 impl Session {
-    fn new() -> Self {
+    fn new(key: [u8; 32]) -> Self {
         let (tx, rx) = mpsc::channel(4096);
         Self {
+            key,
             writers: Mutex::new(HashMap::new()),
             downstream_tx: tx,
             downstream_rx: Mutex::new(rx),
@@ -123,6 +125,13 @@ impl Session {
 }
 
 const SESSION_IDLE_TTL_SECS: u64 = 15 * 60;
+
+struct ValidatedTransportAuth {
+    key: [u8; 32],
+    mode: &'static str,
+    subject: String,
+    bridge_id: Option<String>,
+}
 
 fn unix_now_secs() -> u64 {
     SystemTime::now()
@@ -301,51 +310,111 @@ async fn handle_auth(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AuthRequest>,
 ) -> impl IntoResponse {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    // Check timestamp drift
-    let drift = if req.ts > now {
-        req.ts - now
-    } else {
-        now - req.ts
+    let auth = match validate_transport_auth(&state, &req).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            warn!("Auth rejected: {}", error);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "invalid credentials"})),
+            );
+        }
     };
-    if drift > state.max_drift {
-        warn!("Auth rejected: timestamp drift {}s", drift);
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid credentials"})),
-        );
-    }
 
-    // Verify HMAC signature
-    if !verify_auth(&state.secret, req.ts, &req.n, &req.sig) {
-        warn!("Auth rejected: bad signature");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid credentials"})),
-        );
-    }
-
-    if !state.register_auth_nonce(&req.n).await {
-        warn!("Auth rejected: replayed nonce");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid credentials"})),
-        );
-    }
-
-    // Create session
     let token = generate_session_token();
-    let session = Arc::new(Session::new());
+    let session = Arc::new(Session::new(auth.key));
 
     state.sessions.lock().await.insert(token.clone(), session);
 
-    info!("New session created: {}...", &token[..16]);
+    info!(
+        "New session created: {}... mode={} subject={}",
+        &token[..16],
+        auth.mode,
+        auth.subject
+    );
 
-    (StatusCode::OK, Json(serde_json::json!({"token": token})))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "token": token,
+            "auth_mode": auth.mode,
+            "bridge_id": auth.bridge_id,
+        })),
+    )
+}
+
+async fn validate_transport_auth(
+    state: &Arc<AppState>,
+    auth: &AuthRequest,
+) -> Result<ValidatedTransportAuth, String> {
+    if let Some(ticket) = auth.ticket.as_deref().filter(|ticket| !ticket.trim().is_empty()) {
+        let claims = verify_transport_ticket(&state.secret, ticket, unix_now_secs())
+            .map_err(|error| error.to_string())?;
+        let nonce_key = format!("ticket:{}", claims.jti);
+        if !state.register_auth_nonce(&nonce_key).await {
+            return Err("replayed transport ticket".to_string());
+        }
+        let key = claims
+            .session_key_bytes()
+            .map_err(|error| error.to_string())?;
+        return Ok(ValidatedTransportAuth {
+            key,
+            mode: "ticket",
+            subject: claims.sub,
+            bridge_id: claims.bridge_id,
+        });
+    }
+
+    let now = unix_now_secs();
+    let drift = if auth.ts > now {
+        auth.ts - now
+    } else {
+        now - auth.ts
+    };
+    if drift > state.max_drift {
+        return Err(format!("timestamp drift {}s", drift));
+    }
+
+    if !verify_auth(&state.secret, auth.ts, &auth.n, &auth.sig) {
+        return Err("bad legacy signature".to_string());
+    }
+
+    if !state.register_auth_nonce(&auth.n).await {
+        return Err("replayed legacy nonce".to_string());
+    }
+
+    Ok(ValidatedTransportAuth {
+        key: state.key,
+        mode: "legacy",
+        subject: "shared-secret".to_string(),
+        bridge_id: None,
+    })
+}
+
+async fn validate_relay_auth(
+    state: &Arc<AppState>,
+    auth_json: serde_json::Value,
+) -> Result<(ValidatedTransportAuth, String), String> {
+    let auth: AuthRequest =
+        serde_json::from_value(auth_json.clone()).map_err(|_| "invalid relay request".to_string())?;
+    if auth.mode.as_deref() != Some("relay") {
+        return Err("invalid relay mode".to_string());
+    }
+
+    let relay_label = auth_json["label"].as_str().unwrap_or("unknown").to_string();
+    let validated = validate_transport_auth(state, &auth).await?;
+    if validated.mode == "ticket" {
+        let claims = auth
+            .ticket
+            .as_deref()
+            .and_then(|ticket| decode_transport_ticket(ticket).ok())
+            .ok_or_else(|| "invalid relay ticket".to_string())?;
+        if !claims.capabilities.iter().any(|capability| capability == "relay") {
+            return Err("relay ticket missing capability".to_string());
+        }
+    }
+
+    Ok((validated, relay_label))
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -391,44 +460,16 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    // Check auth credentials
-    let ts = auth_json["ts"].as_u64().unwrap_or(0);
-    let nonce = auth_json["n"].as_str().unwrap_or("");
-    let sig = auth_json["sig"].as_str().unwrap_or("");
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let drift = if ts > now { ts - now } else { now - ts };
-
-    if drift > state.max_drift || !verify_auth(&state.secret, ts, nonce, sig) {
-        warn!("[RELAY] Auth rejected");
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
-            .await;
-        return;
-    }
-
-    if !state.register_auth_nonce(nonce).await {
-        warn!("[RELAY] Auth rejected: replayed nonce");
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
-            .await;
-        return;
-    }
-
-    // Check for relay mode flag
-    let mode = auth_json["mode"].as_str().unwrap_or("");
-    if mode != "relay" {
-        warn!("[RELAY] Not a relay auth (mode='{}')", mode);
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"invalid mode"}"#.into()))
-            .await;
-        return;
-    }
-
-    let relay_label = auth_json["label"].as_str().unwrap_or("unknown").to_string();
+    let (relay_auth, relay_label) = match validate_relay_auth(&state, auth_json).await {
+        Ok(result) => result,
+        Err(error) => {
+            warn!("[RELAY] Auth rejected: {}", error);
+            let _ = ws_sender
+                .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
+                .await;
+            return;
+        }
+    };
 
     // Accept the relay
     let relay_id = generate_session_token();
@@ -444,7 +485,7 @@ async fn handle_relay_websocket(socket: WebSocket, state: Arc<AppState>) {
         &relay_id[..16]
     );
 
-    let key = state.key;
+    let key = relay_auth.key;
 
     // Channel for sending frames TO the relay (server → relay)
     let (relay_tx, mut relay_rx) = mpsc::channel::<Frame>(4096);
@@ -620,68 +661,46 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
         }
     };
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let drift = if auth.ts > now {
-        auth.ts - now
-    } else {
-        now - auth.ts
+    let validated = match validate_transport_auth(&state, &auth).await {
+        Ok(validated) => validated,
+        Err(error) => {
+            warn!("[PHANTOM] WS auth rejected: {}", error);
+            let _ = ws_sender
+                .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
+                .await;
+            return;
+        }
     };
 
-    if drift > state.max_drift {
-        warn!(
-            "[PHANTOM] WS auth rejected: drift {}s (max {}s) — client clock out of sync",
-            drift, state.max_drift
-        );
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"clock drift too high"}"#.into()))
-            .await;
-        return;
-    }
-
-    if !verify_auth(&state.secret, auth.ts, &auth.n, &auth.sig) {
-        warn!("[PHANTOM] WS auth rejected: bad HMAC signature — wrong secret");
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
-            .await;
-        return;
-    }
-
-    if !state.register_auth_nonce(&auth.n).await {
-        warn!("[PHANTOM] WS auth rejected: replayed nonce");
-        let _ = ws_sender
-            .send(Message::Text(r#"{"error":"unauthorized"}"#.into()))
-            .await;
-        return;
-    }
-
-    // Create session
     let token = generate_session_token();
-    let session = Arc::new(Session::new());
+    let session = Arc::new(Session::new(validated.key));
     state
         .sessions
         .lock()
         .await
         .insert(token.clone(), session.clone());
 
-    // Check if relay routing is available
     let has_relay = state.get_relay().await.is_some();
 
     let _ = ws_sender
         .send(Message::Text(
-            serde_json::json!({"token": &token, "relay": has_relay}).to_string(),
+            serde_json::json!({
+                "token": &token,
+                "relay": has_relay,
+                "auth_mode": validated.mode,
+                "bridge_id": validated.bridge_id,
+            }).to_string(),
         ))
         .await;
 
     info!(
-        "[PHANTOM] ✓ WS session established: {}... (relay: {})",
+        "[PHANTOM] ✓ WS session established: {}... (relay: {}, mode: {})",
         &token[..16],
-        has_relay
+        has_relay,
+        validated.mode
     );
 
-    let key = state.key;
+    let key = session.key;
 
     // ── Step 2: Bidirectional relay ──
 
@@ -972,7 +991,7 @@ async fn handle_sync(
         }
     };
 
-    let plaintext = match decrypt(&state.key, &encrypted) {
+    let plaintext = match decrypt(&session.key, &encrypted) {
         Ok(p) => p,
         Err(_) => {
             return (StatusCode::OK, Json(serde_json::json!({"d": ""})));
@@ -1003,7 +1022,7 @@ async fn handle_sync(
 
     // Encode, encrypt, base64
     let plaintext = encode_frames(&downstream_frames);
-    let encrypted = encrypt(&state.key, &plaintext);
+    let encrypted = encrypt(&session.key, &plaintext);
     let encoded = b64_encode(&encrypted);
 
     (StatusCode::OK, Json(serde_json::json!({"d": encoded})))

@@ -13,8 +13,13 @@
 #[cfg(target_os = "android")]
 pub(crate) mod android_tun;
 pub mod ffi;
-pub(crate) mod fragment;
+pub(crate) mod heuristics;
+pub(crate) mod mesh;
+pub(crate) mod peer_discovery;
+pub(crate) mod relay_forwarder;
+pub(crate) mod tls_fragment;
 pub(crate) mod transport;
+pub(crate) mod trust;
 
 use lazy_static::lazy_static;
 use phantom_proto::*;
@@ -41,6 +46,8 @@ pub struct ClientConfig {
     pub server_url: String,
     /// Shared secret (must match server)
     pub secret: String,
+    /// Short-lived signed transport ticket from Vibe control plane
+    pub auth_ticket: Option<String>,
     /// Local SOCKS5 listen address (e.g., "127.0.0.1:1080")
     pub listen: String,
     /// Transport mode: WebSocket, Http, or Auto
@@ -60,6 +67,8 @@ pub struct ClientConfig {
     /// Custom SNI for TLS handshake (for DPI bypass)
     /// When set, TLS ClientHello uses this SNI instead of the real host
     pub sni_override: Option<String>,
+    /// Mesh bootstrap metadata (bridges + peers) for stats and routing heuristics
+    pub mesh_bootstrap: Option<MeshBootstrapConfig>,
 }
 
 impl Default for ClientConfig {
@@ -67,6 +76,7 @@ impl Default for ClientConfig {
         Self {
             server_url: String::new(),
             secret: String::new(),
+            auth_ticket: None,
             listen: "127.0.0.1:1080".to_string(),
             transport: TransportMode::Auto,
             cdn_edge: None,
@@ -75,6 +85,7 @@ impl Default for ClientConfig {
             fragment_size: 40,
             padding: true,
             sni_override: None,
+            mesh_bootstrap: None,
         }
     }
 }
@@ -173,6 +184,7 @@ pub fn clear_runtime_stats() {
     if let Ok(mut snapshot) = RUNTIME_STATS.lock() {
         *snapshot = RuntimeStatsSnapshot::default();
     }
+    let _ = mesh::reset_from_bootstrap(None, None);
 }
 
 pub fn set_runtime_state(state: &str) {
@@ -271,6 +283,7 @@ pub async fn start_client(server_url: String, secret: String, listen: String) {
     start_client_with_config(ClientConfig {
         server_url,
         secret,
+        auth_ticket: None,
         listen,
         transport: TransportMode::Auto,
         ..Default::default()
@@ -322,8 +335,14 @@ pub async fn start_client_with_listener(
 ) {
     reset_runtime_stats(&config);
 
-    let key = derive_key(&config.secret);
+    let key = resolve_transport_key(&config);
     let server_url = config.server_url.trim_end_matches('/').to_string();
+    let listen_port = runtime_listen_port(&config.listen);
+
+    mesh::reset_from_bootstrap(config.mesh_bootstrap.as_ref(), listen_port);
+    mesh::set_status("starting");
+    mesh::attach_proxy_port(listen_port);
+    mesh::init_forwarder(key);
 
     info!("[PHANTOM] ═══════════════════════════════════════");
     info!("[PHANTOM] Phantom Client v0.2.0 starting");
@@ -371,6 +390,7 @@ pub async fn start_client_with_listener(
     let transport_config = transport::TransportConfig {
         server_url: server_url.clone(),
         secret: config.secret.clone(),
+        auth_ticket: config.auth_ticket.clone(),
         key,
         mode: config.transport.clone(),
         host_header: config.host_override.clone(),
@@ -378,6 +398,7 @@ pub async fn start_client_with_listener(
         sni_override: config.sni_override.clone(),
         fragment_enabled: config.fragment,
         fragment_size: config.fragment_size,
+        spki_pins: selected_bridge_pins(&config, &server_url),
     };
 
     // Spawn the transport loop (WebSocket, HTTP, or Auto)
@@ -418,6 +439,7 @@ pub async fn start_client_with_listener(
                     Ok(()) => {
                         if *shutdown_rx.borrow() {
                             info!("[PHANTOM] Shutdown requested for local client");
+                            mesh::set_status("stopped");
                             break;
                         }
                     }
@@ -439,8 +461,44 @@ pub async fn start_client_with_config(config: ClientConfig) {
         }
         Err(e) => {
             error!("[PHANTOM] ❌ {}", e);
+            mesh::set_last_error(e);
         }
     }
+}
+
+fn resolve_transport_key(config: &ClientConfig) -> [u8; 32] {
+    if let Some(ticket) = config.auth_ticket.as_deref() {
+        if let Some(key) = mesh::ticket_transport_key(ticket) {
+            return key;
+        }
+    }
+    derive_key(&config.secret)
+}
+
+fn selected_bridge_pins(config: &ClientConfig, server_url: &str) -> Vec<String> {
+    let Some(bootstrap) = config.mesh_bootstrap.as_ref() else {
+        return Vec::new();
+    };
+
+    let normalized_server_url = server_url.trim_end_matches('/');
+    let active_bridge_id = heuristics::select_active_bridge(
+        &bootstrap.bridges,
+        bootstrap.preferred_bridge_id.as_deref(),
+        unix_now_secs(),
+    );
+
+    active_bridge_id
+        .as_deref()
+        .and_then(|bridge_id| bootstrap.bridges.iter().find(|bridge| bridge.id == bridge_id))
+        .or_else(|| {
+            bootstrap
+                .bridges
+                .iter()
+                .find(|bridge| bridge.base_url.trim_end_matches('/') == normalized_server_url)
+        })
+        .or_else(|| bootstrap.bridges.iter().find(|bridge| !bridge.spki_pins.is_empty()))
+        .map(|bridge| bridge.spki_pins.clone())
+        .unwrap_or_default()
 }
 
 // ─── Shared Helpers (used by transport module) ─────────────────

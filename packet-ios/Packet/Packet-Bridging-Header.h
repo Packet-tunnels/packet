@@ -7,7 +7,9 @@
 void phantom_set_log_callback(void (*cb)(const char*));
 void phantom_emit_test_output(void);
 char *phantom_copy_stats_json(void);
+char *phantom_copy_mesh_stats_json(void);
 void phantom_free_string(char *value);
+void phantom_stop_client(void);
 
 // Basic start
 int32_t phantom_start(
@@ -25,5 +27,14 @@ int32_t phantom_start_cdn(
     const char *host_override,
     int32_t transport_mode
 );
+
+// Native Packet mesh start
+int32_t phantom_start_mesh(
+    const char *config_json,
+    uint16_t listen_port
+);
+
+// Import Packet peer descriptors
+int32_t phantom_import_mesh_peers(const char *peers_json);
 
 #endif /* Packet_Bridging_Header_h */

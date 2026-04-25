@@ -1,0 +1,18 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Push a new beta build to TestFlight"
+  lane :beta do
+    # Ensure certificates and profiles are present
+    get_certificates
+    get_provisioning_profile(app_identifier: "com.resolo.packet")
+    get_provisioning_profile(app_identifier: "com.resolo.packet.PacketTunnel")
+
+    build_app(
+      project: "Packet.xcodeproj",
+      scheme: "Packet",
+      export_method: "app-store"
+    )
+    upload_to_testflight
+  end
+end

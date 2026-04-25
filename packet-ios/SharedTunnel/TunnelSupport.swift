@@ -325,10 +325,10 @@ enum PacketComplianceCopy {
     static let summaryItems: [PacketComplianceSummaryItem] = [
         PacketComplianceSummaryItem(
             id: "local-storage",
-            systemImage: "internaldrive",
-            title: "Stored on This Device",
+            systemImage: "lock.shield",
+            title: "Secure Local Storage",
             detail:
-                "Your server URL, shared secret, and disclosure acknowledgement stay on this device so Packet can reconnect with the same configuration."
+                "Your server URL and settings stay on this device. Sensitive credentials like your Shared Secret are encrypted and stored in the secure iOS Keychain."
         ),
         PacketComplianceSummaryItem(
             id: "traffic-handling",

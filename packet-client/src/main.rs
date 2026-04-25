@@ -84,6 +84,7 @@ async fn main() {
         fragment_size: cli.fragment_size,
         padding: !cli.no_padding,
         sni_override: cli.sni,
+        ..Default::default()
     };
 
     phantom_client::start_client_with_config(config).await;

@@ -1,4 +1,6 @@
-use crate::{bind_socks_listener, start_client_with_listener, ClientConfig, TransportMode};
+use crate::{bind_socks_listener, mesh, start_client_with_listener, ClientConfig, TransportMode};
+use phantom_proto::{MeshBootstrapConfig, PacketPeerDescriptor};
+use serde::Deserialize;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::sync::Mutex;
@@ -23,6 +25,28 @@ lazy_static::lazy_static! {
 struct ActiveClient {
     shutdown_tx: watch::Sender<bool>,
     handle: thread::JoinHandle<()>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeshStartRequest {
+    server_url: String,
+    ticket: String,
+    #[serde(default)]
+    listen_port: Option<u16>,
+    #[serde(default)]
+    transport_mode: Option<String>,
+    #[serde(default)]
+    cdn_edge: Option<String>,
+    #[serde(default)]
+    host_override: Option<String>,
+    #[serde(default)]
+    sni_override: Option<String>,
+    #[serde(default)]
+    fragment: bool,
+    #[serde(default)]
+    fragment_size: Option<usize>,
+    #[serde(default)]
+    bootstrap: Option<MeshBootstrapConfig>,
 }
 
 lazy_static::lazy_static! {
@@ -223,6 +247,14 @@ pub extern "C" fn phantom_copy_stats_json() -> *mut c_char {
         .into_raw()
 }
 
+#[no_mangle]
+pub extern "C" fn phantom_copy_mesh_stats_json() -> *mut c_char {
+    let json = mesh::stats_json().unwrap_or_else(|| "{}".to_string());
+    CString::new(json)
+        .unwrap_or_else(|_| CString::new("{}").unwrap())
+        .into_raw()
+}
+
 /// Frees a string previously allocated by `phantom_copy_stats_json`.
 #[no_mangle]
 pub extern "C" fn phantom_free_string(s: *mut c_char) {
@@ -238,6 +270,27 @@ pub extern "C" fn phantom_free_string(s: *mut c_char) {
 pub extern "C" fn phantom_stop_client() {
     init_logging();
     stop_active_client();
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_import_mesh_peers(peers_json: *const c_char) -> i32 {
+    let payload = unsafe {
+        if peers_json.is_null() {
+            return -1;
+        }
+        CStr::from_ptr(peers_json).to_string_lossy().into_owned()
+    };
+
+    let peers: Vec<PacketPeerDescriptor> = match serde_json::from_str(&payload) {
+        Ok(peers) => peers,
+        Err(error) => {
+            tracing::error!("[PHANTOM] ❌ Failed to parse mesh peers JSON: {}", error);
+            return -2;
+        }
+    };
+
+    mesh::import_peers(peers);
+    0
 }
 
 /// Start Phantom Tunnel with basic configuration (backward compatible).
@@ -279,6 +332,25 @@ pub extern "C" fn phantom_start(
         },
         listener,
     )
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_start_mesh(config_json: *const c_char, listen_port: u16) -> i32 {
+    let payload = unsafe {
+        if config_json.is_null() {
+            return -1;
+        }
+        CStr::from_ptr(config_json).to_string_lossy().into_owned()
+    };
+
+    init_logging();
+    match start_mesh_from_json(&payload, listen_port) {
+        Ok(port) => port,
+        Err(error) => {
+            tracing::error!("[PHANTOM] ❌ {}", error);
+            -2
+        }
+    }
 }
 
 /// Start Phantom Tunnel with CDN bypass configuration.
@@ -357,6 +429,8 @@ pub extern "C" fn phantom_start_cdn(
         fragment_size: 40,
         padding: true,
         sni_override: None,
+        auth_ticket: None,
+        mesh_bootstrap: None,
     };
 
     spawn_client_with_bound_listener(config, listener)
@@ -412,6 +486,19 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_copyMeshStatsJson(
+        mut env: EnvUnowned,
+        _class: JClass,
+    ) -> jstring {
+        env.with_env(|env| -> JniResult<jstring> {
+            let json = mesh::stats_json().unwrap_or_else(|| "{}".to_string());
+            let java_string = env.new_string(json)?;
+            Ok(java_string.into_raw())
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_stopClient(
         _env: EnvUnowned,
         _class: JClass,
@@ -453,6 +540,49 @@ pub mod android {
                 },
                 listener,
             ) as jint)
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startMeshClient(
+        mut env: EnvUnowned,
+        _class: JClass,
+        config_json: JString,
+        listen_port: jint,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let payload = config_json.try_to_string(env)?;
+            init_logging();
+            match start_mesh_from_json(&payload, listen_port as u16) {
+                Ok(port) => Ok(port as jint),
+                Err(error) => {
+                    tracing::error!("[PHANTOM] ❌ {}", error);
+                    Ok(-2)
+                }
+            }
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_importMeshPeers(
+        mut env: EnvUnowned,
+        _class: JClass,
+        peers_json: JString,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let payload = peers_json.try_to_string(env)?;
+            let peers: Vec<PacketPeerDescriptor> =
+                serde_json::from_str(&payload).map_err(|error| {
+                    tracing::error!(
+                        "[PHANTOM] ❌ mesh peer payload parse failed: {}",
+                        error
+                    );
+                    jni::errors::Error::JniCall(jni::errors::JniError::InvalidArguments)
+                })?;
+            mesh::import_peers(peers);
+            Ok(0)
         })
         .resolve::<LogErrorAndDefault>()
     }
@@ -504,6 +634,8 @@ pub mod android {
                 fragment_size: 40,
                 padding: true,
                 sni_override: None,
+                auth_ticket: None,
+                mesh_bootstrap: None,
             };
 
             Ok(spawn_client_with_bound_listener(config, listener) as jint)
@@ -561,9 +693,11 @@ pub mod android {
                 cdn_edge: edge,
                 host_override: host,
                 sni_override: sni,
-                fragment: fragment_enabled != 0,
+                fragment: fragment_enabled,
                 fragment_size: fragment_size as usize,
                 padding: true,
+                auth_ticket: None,
+                mesh_bootstrap: None,
             };
 
             tracing::info!(
@@ -621,5 +755,48 @@ pub mod android {
     ) {
         init_logging();
         crate::android_tun::stop_android_tun_bridge();
+    }
+}
+
+fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32, String> {
+    let request: MeshStartRequest =
+        serde_json::from_str(payload).map_err(|error| format!("Invalid mesh config JSON: {}", error))?;
+
+    if request.ticket.trim().is_empty() {
+        return Err("Mesh ticket missing".to_string());
+    }
+
+    let requested_port = if listen_port_override != 0 {
+        listen_port_override
+    } else {
+        request.listen_port.unwrap_or(0)
+    };
+
+    let (listener, listen_addr, _actual_port) =
+        bind_requested_or_auto_listener(requested_port).map_err(|error| error.to_string())?;
+
+    let config = ClientConfig {
+        server_url: request.server_url,
+        secret: String::new(),
+        auth_ticket: Some(request.ticket),
+        listen: listen_addr,
+        transport: parse_transport_mode(request.transport_mode.as_deref()),
+        cdn_edge: request.cdn_edge,
+        host_override: request.host_override,
+        fragment: request.fragment,
+        fragment_size: request.fragment_size.unwrap_or(40),
+        padding: true,
+        sni_override: request.sni_override,
+        mesh_bootstrap: request.bootstrap,
+    };
+
+    Ok(spawn_client_with_bound_listener(config, listener))
+}
+
+fn parse_transport_mode(value: Option<&str>) -> TransportMode {
+    match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "ws" | "websocket" => TransportMode::WebSocket,
+        "http" => TransportMode::Http,
+        _ => TransportMode::Auto,
     }
 }

@@ -22,6 +22,9 @@ class PacketBridge {
         fun copyStatsJson(): String? = PhantomTunnel.copyStatsJson()
 
         @JvmStatic
+        fun copyMeshStatsJson(): String? = PhantomTunnel.copyMeshStatsJson()
+
+        @JvmStatic
         fun stopClient() {
             PhantomTunnel.stopClient()
         }
@@ -29,6 +32,14 @@ class PacketBridge {
         @JvmStatic
         fun startClient(serverUrl: String, secret: String, listenPort: Int): Int =
             PhantomTunnel.startClient(serverUrl, secret, listenPort)
+
+        @JvmStatic
+        fun startMeshClient(configJson: String, listenPort: Int): Int =
+            PhantomTunnel.startMeshClient(configJson, listenPort)
+
+        @JvmStatic
+        fun importMeshPeers(peersJson: String): Int =
+            PhantomTunnel.importMeshPeers(peersJson)
 
         @JvmStatic
         fun startClientCdn(
