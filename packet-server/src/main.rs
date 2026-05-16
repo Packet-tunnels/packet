@@ -263,6 +263,7 @@ async fn serve_homepage() -> Html<&'static str> {
 }
 
 async fn serve_about() -> Html<&'static str> {
+    Html(
         r#"<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
@@ -275,6 +276,7 @@ async fn serve_about() -> Html<&'static str> {
 }
 
 async fn serve_contact() -> Html<&'static str> {
+    Html(
         r#"<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
