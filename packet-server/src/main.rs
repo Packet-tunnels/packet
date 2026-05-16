@@ -263,28 +263,26 @@ async fn serve_homepage() -> Html<&'static str> {
 }
 
 async fn serve_about() -> Html<&'static str> {
-    Html(
         r#"<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
-<style>body{background:#0f1014;color:#e2e4e9;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#d4af37;text-decoration:none;}</style>
-<title>درباره ما - استودیو آرتین</title></head>
-<body><h1>درباره استودیو آرتین</h1>
-<p>ما گروهی از معماران و طراحان خلاق هستیم که به زیبایی در سادگی باور داریم.</p>
-<p><a href="/">← بازگشت به خانه</a></p></body></html>"#,
+<style>body{background:#08090a;color:#f0f0f0;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#e5b869;text-decoration:none;}</style>
+<title>درباره ما - مسترکلاس پیانو</title></head>
+<body><h1>درباره آموزش پیانو</h1>
+<p>این پلتفرم به زودی برای ارتقای سطح آموزش موسیقی راه‌اندازی می‌شود.</p>
+<p><a href="/">← بازگشت</a></p></body></html>"#,
     )
 }
 
 async fn serve_contact() -> Html<&'static str> {
-    Html(
         r#"<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
-<style>body{background:#0f1014;color:#e2e4e9;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#d4af37;text-decoration:none;}</style>
-<title>تماس با ما - استودیو آرتین</title></head>
+<style>body{background:#08090a;color:#f0f0f0;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#e5b869;text-decoration:none;}</style>
+<title>تماس با ما - مسترکلاس پیانو</title></head>
 <body><h1>ارتباط با ما</h1>
-<p>برای رزرو مشاوره طراحی با ایمیل info@artin-studio.com در ارتباط باشید.</p>
-<p><a href="/">← بازگشت به خانه</a></p></body></html>"#,
+<p>اطلاعات تماس به زودی پس از رونمایی در دسترس قرار خواهد گرفت.</p>
+<p><a href="/">← بازگشت</a></p></body></html>"#,
     )
 }
 
