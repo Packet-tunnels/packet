@@ -265,27 +265,26 @@ async fn serve_homepage() -> Html<&'static str> {
 async fn serve_about() -> Html<&'static str> {
     Html(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>About - Piano Lessons Online</title>
-<style>body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333;line-height:1.8}
-h1{color:#2c3e50}a{color:#3498db}</style></head>
-<body><h1>About Our Piano Lessons</h1>
-<p>We offer comprehensive online piano lessons for all skill levels. Our certified instructors
-bring decades of experience to help you master the piano from the comfort of your home.</p>
-<p>Founded in 2024, we have helped over 500 students achieve their musical goals.</p>
-<p><a href="/">← Back to Home</a></p></body></html>"#,
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
+<style>body{background:#0f1014;color:#e2e4e9;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#d4af37;text-decoration:none;}</style>
+<title>درباره ما - استودیو آرتین</title></head>
+<body><h1>درباره استودیو آرتین</h1>
+<p>ما گروهی از معماران و طراحان خلاق هستیم که به زیبایی در سادگی باور داریم.</p>
+<p><a href="/">← بازگشت به خانه</a></p></body></html>"#,
     )
 }
 
 async fn serve_contact() -> Html<&'static str> {
     Html(
         r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>Contact - Piano Lessons Online</title>
-<style>body{font-family:Georgia,serif;max-width:800px;margin:40px auto;padding:0 20px;color:#333;line-height:1.8}
-h1{color:#2c3e50}a{color:#3498db}</style></head>
-<body><h1>Contact Us</h1>
-<p>Email: info@piano-lessons.site</p>
-<p>We typically respond within 24 hours.</p>
-<p><a href="/">← Back to Home</a></p></body></html>"#,
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.0.0/Vazirmatn-font-face.css" rel="stylesheet" type="text/css" />
+<style>body{background:#0f1014;color:#e2e4e9;font-family:'Vazirmatn',sans-serif;text-align:center;padding:100px;line-height:1.8;} a{color:#d4af37;text-decoration:none;}</style>
+<title>تماس با ما - استودیو آرتین</title></head>
+<body><h1>ارتباط با ما</h1>
+<p>برای رزرو مشاوره طراحی با ایمیل info@artin-studio.com در ارتباط باشید.</p>
+<p><a href="/">← بازگشت به خانه</a></p></body></html>"#,
     )
 }
 
