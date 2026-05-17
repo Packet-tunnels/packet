@@ -180,7 +180,7 @@ class SettingsActivity : Activity() {
                 .takeIf { it.isNotBlank() }
                 ?.let(::add)
             add(savedConfiguration.configuration.transportLabel)
-            if (savedConfiguration.configuration.usesCdn) {
+            if (savedConfiguration.configuration.usesAdvancedStart) {
                 add(savedConfiguration.configuration.ingressLabel)
             }
         }.ifEmpty {

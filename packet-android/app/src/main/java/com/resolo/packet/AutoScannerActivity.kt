@@ -184,6 +184,14 @@ class AutoScannerActivity : Activity() {
             transportMode = TunnelTransportMode.WEBSOCKET
         ))
 
+        profiles.add(TestProfile(
+            name = "Stealth HTTPS + Default SNI",
+            cdnEdge = "185.239.1.185:443",
+            hostOverride = baseConfiguration!!.normalizedHostOverride.ifBlank { baseConfiguration!!.serverHost },
+            sniOverride = "",
+            transportMode = TunnelTransportMode.STEALTH
+        ))
+
         // 5. Spoofed SNIs over port 443 with WebSocket
         snisToTest.filter { it.isNotBlank() }.forEach { sni ->
             profiles.add(TestProfile(
@@ -202,6 +210,14 @@ class AutoScannerActivity : Activity() {
                 transportMode = TunnelTransportMode.WEBSOCKET,
                 fragmentEnabled = true,
                 fragmentSizeValue = 40
+            ))
+
+            profiles.add(TestProfile(
+                name = "Stealth + SNI: $sni",
+                cdnEdge = "185.239.1.185:443",
+                hostOverride = baseConfiguration!!.normalizedHostOverride.ifBlank { baseConfiguration!!.serverHost },
+                sniOverride = sni,
+                transportMode = TunnelTransportMode.STEALTH
             ))
         }
 
@@ -446,7 +462,8 @@ class AutoScannerActivity : Activity() {
         val checks = mutableListOf<DirectNetworkCheck>()
 
         when (profile.transportMode) {
-            TunnelTransportMode.HTTP -> {
+            TunnelTransportMode.HTTP,
+            TunnelTransportMode.STEALTH -> {
                 checks += runHttpNetworkChecks(
                     endpoint = endpoint,
                     hostHeader = hostHeader,
@@ -842,6 +859,7 @@ class AutoScannerActivity : Activity() {
         val timeoutMs = when (transportMode) {
             TunnelTransportMode.HTTP -> 40_000L
             TunnelTransportMode.WEBSOCKET -> 18_000L
+            TunnelTransportMode.STEALTH -> 40_000L
             TunnelTransportMode.AUTO -> 25_000L
         }
         val startedAt = System.currentTimeMillis()

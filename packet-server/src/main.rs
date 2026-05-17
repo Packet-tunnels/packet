@@ -346,7 +346,11 @@ async fn validate_transport_auth(
     state: &Arc<AppState>,
     auth: &AuthRequest,
 ) -> Result<ValidatedTransportAuth, String> {
-    if let Some(ticket) = auth.ticket.as_deref().filter(|ticket| !ticket.trim().is_empty()) {
+    if let Some(ticket) = auth
+        .ticket
+        .as_deref()
+        .filter(|ticket| !ticket.trim().is_empty())
+    {
         let claims = verify_transport_ticket(&state.secret, ticket, unix_now_secs())
             .map_err(|error| error.to_string())?;
         let nonce_key = format!("ticket:{}", claims.jti);
@@ -394,8 +398,8 @@ async fn validate_relay_auth(
     state: &Arc<AppState>,
     auth_json: serde_json::Value,
 ) -> Result<(ValidatedTransportAuth, String), String> {
-    let auth: AuthRequest =
-        serde_json::from_value(auth_json.clone()).map_err(|_| "invalid relay request".to_string())?;
+    let auth: AuthRequest = serde_json::from_value(auth_json.clone())
+        .map_err(|_| "invalid relay request".to_string())?;
     if auth.mode.as_deref() != Some("relay") {
         return Err("invalid relay mode".to_string());
     }
@@ -408,7 +412,11 @@ async fn validate_relay_auth(
             .as_deref()
             .and_then(|ticket| decode_transport_ticket(ticket).ok())
             .ok_or_else(|| "invalid relay ticket".to_string())?;
-        if !claims.capabilities.iter().any(|capability| capability == "relay") {
+        if !claims
+            .capabilities
+            .iter()
+            .any(|capability| capability == "relay")
+        {
             return Err("relay ticket missing capability".to_string());
         }
     }
@@ -688,7 +696,8 @@ async fn handle_websocket(socket: WebSocket, state: Arc<AppState>) {
                 "relay": has_relay,
                 "auth_mode": validated.mode,
                 "bridge_id": validated.bridge_id,
-            }).to_string(),
+            })
+            .to_string(),
         ))
         .await;
 

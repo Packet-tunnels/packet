@@ -23,13 +23,17 @@ enum TunnelProviderKeys {
     static let listenPort = "listenPort"
     static let cdnEdge = "cdnEdge"
     static let hostOverride = "hostOverride"
+    static let sniOverride = "sniOverride"
     static let transportMode = "transportMode"
+    static let fragmentEnabled = "fragmentEnabled"
+    static let fragmentSize = "fragmentSize"
 }
 
 enum TunnelTransportMode: Int32, CaseIterable, Identifiable, Codable {
     case auto = 0
     case webSocket = 1
     case http = 2
+    case stealth = 3
 
     var id: Int32 { rawValue }
 
@@ -41,6 +45,8 @@ enum TunnelTransportMode: Int32, CaseIterable, Identifiable, Codable {
             return "WebSocket"
         case .http:
             return "HTTP"
+        case .stealth:
+            return "Stealth"
         }
     }
 }
@@ -51,7 +57,10 @@ struct TunnelConfiguration: Codable, Equatable {
     var listenPort = ""
     var cdnEdge = ""
     var hostOverride = ""
+    var sniOverride = ""
     var transportMode: TunnelTransportMode = .auto
+    var fragmentEnabled = false
+    var fragmentSize = "40"
 
     init() {}
 
@@ -60,6 +69,7 @@ struct TunnelConfiguration: Codable, Equatable {
         secret = providerConfiguration[TunnelProviderKeys.secret] as? String ?? secret
         cdnEdge = providerConfiguration[TunnelProviderKeys.cdnEdge] as? String ?? cdnEdge
         hostOverride = providerConfiguration[TunnelProviderKeys.hostOverride] as? String ?? hostOverride
+        sniOverride = providerConfiguration[TunnelProviderKeys.sniOverride] as? String ?? sniOverride
 
         if let port = providerConfiguration[TunnelProviderKeys.listenPort] as? NSNumber,
             port.intValue > 0
@@ -74,6 +84,20 @@ struct TunnelConfiguration: Codable, Equatable {
         } else if let rawValue = providerConfiguration[TunnelProviderKeys.transportMode] as? Int32 {
             transportMode = TunnelTransportMode(rawValue: rawValue) ?? .auto
         }
+
+        if let enabled = providerConfiguration[TunnelProviderKeys.fragmentEnabled] as? NSNumber {
+            fragmentEnabled = enabled.boolValue
+        } else if let enabled = providerConfiguration[TunnelProviderKeys.fragmentEnabled] as? Bool {
+            fragmentEnabled = enabled
+        }
+
+        if let size = providerConfiguration[TunnelProviderKeys.fragmentSize] as? NSNumber,
+            size.intValue > 0
+        {
+            fragmentSize = size.stringValue
+        } else if let size = providerConfiguration[TunnelProviderKeys.fragmentSize] as? String {
+            fragmentSize = size
+        }
     }
 
     var isEmpty: Bool {
@@ -82,7 +106,9 @@ struct TunnelConfiguration: Codable, Equatable {
             && Self.trimmed(listenPort).isEmpty
             && normalizedCDNEdge.isEmpty
             && normalizedHostOverride.isEmpty
+            && normalizedSNIOverride.isEmpty
             && transportMode == .auto
+            && !fragmentEnabled
     }
 
     var normalizedServerURL: String {
@@ -99,6 +125,10 @@ struct TunnelConfiguration: Codable, Equatable {
 
     var normalizedHostOverride: String {
         Self.trimmed(hostOverride)
+    }
+
+    var normalizedSNIOverride: String {
+        Self.trimmed(sniOverride)
     }
 
     var cdnEdgeValidationError: String? {
@@ -126,8 +156,39 @@ struct TunnelConfiguration: Codable, Equatable {
         return nil
     }
 
+    var advancedValidationError: String? {
+        if cdnEdgeValidationError != nil {
+            return cdnEdgeValidationError
+        }
+
+        if !normalizedSNIOverride.isEmpty
+            && !normalizedServerURL.lowercased().hasPrefix("https://")
+        {
+            return "SNI override requires an https:// server URL."
+        }
+
+        if transportMode == .stealth
+            && !normalizedServerURL.lowercased().hasPrefix("https://")
+        {
+            return "Stealth transport requires an https:// server URL."
+        }
+
+        if fragmentEnabled {
+            let rawSize = Self.trimmed(fragmentSize)
+            guard let size = UInt32(rawSize), (1...1000).contains(size) else {
+                return "Fragment size must be between 1 and 1000."
+            }
+        }
+
+        return nil
+    }
+
     var usesCDN: Bool {
         !normalizedCDNEdge.isEmpty || !normalizedHostOverride.isEmpty
+    }
+
+    var usesAdvancedStart: Bool {
+        usesCDN || !normalizedSNIOverride.isEmpty || transportMode != .auto || fragmentEnabled
     }
 
     var listenPortValue: UInt16? {
@@ -137,6 +198,12 @@ struct TunnelConfiguration: Codable, Equatable {
         }
 
         return UInt16(trimmed)
+    }
+
+    var fragmentSizeValue: UInt32 {
+        guard fragmentEnabled else { return 40 }
+        let value = UInt32(Self.trimmed(fragmentSize)) ?? 40
+        return min(max(value, 1), 1000)
     }
 
     var remoteAddress: String {
@@ -153,6 +220,14 @@ struct TunnelConfiguration: Codable, Equatable {
     }
 
     var ingressLabel: String {
+        if transportMode == .stealth {
+            return "Stealth TLS"
+        }
+
+        if !normalizedSNIOverride.isEmpty {
+            return "SNI fronting"
+        }
+
         if !normalizedCDNEdge.isEmpty || !normalizedHostOverride.isEmpty {
             return "CDN relay"
         }
@@ -236,7 +311,10 @@ struct TunnelConfiguration: Codable, Equatable {
             TunnelProviderKeys.secret: normalizedSecret,
             TunnelProviderKeys.cdnEdge: normalizedCDNEdge,
             TunnelProviderKeys.hostOverride: normalizedHostOverride,
-            TunnelProviderKeys.transportMode: Int(transportMode.rawValue)
+            TunnelProviderKeys.sniOverride: normalizedSNIOverride,
+            TunnelProviderKeys.transportMode: Int(transportMode.rawValue),
+            TunnelProviderKeys.fragmentEnabled: fragmentEnabled,
+            TunnelProviderKeys.fragmentSize: Int(fragmentSizeValue)
         ]
 
         if let listenPortValue {
@@ -484,17 +562,23 @@ enum TunnelRuntimeBridge {
 
         return configuration.normalizedServerURL.withCString { serverURLPointer in
             configuration.normalizedSecret.withCString { secretPointer in
-                if configuration.usesCDN || configuration.transportMode != .auto {
+                if configuration.usesAdvancedStart {
                     return withOptionalCString(configuration.normalizedCDNEdge) { cdnEdgePointer in
                         withOptionalCString(configuration.normalizedHostOverride) { hostOverridePointer in
-                            phantom_start_cdn(
-                                serverURLPointer,
-                                secretPointer,
-                                listenPort,
-                                cdnEdgePointer,
-                                hostOverridePointer,
-                                configuration.transportMode.rawValue
-                            )
+                            withOptionalCString(configuration.normalizedSNIOverride) { sniOverridePointer in
+                                phantom_start_full(
+                                    serverURLPointer,
+                                    secretPointer,
+                                    listenPort,
+                                    cdnEdgePointer,
+                                    hostOverridePointer,
+                                    sniOverridePointer,
+                                    configuration.transportMode.rawValue,
+                                    configuration.fragmentEnabled ? 1 : 0,
+                                    configuration.fragmentSizeValue,
+                                    configuration.transportMode == .stealth ? 1 : 0
+                                )
+                            }
                         }
                     }
                 }

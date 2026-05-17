@@ -146,10 +146,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             throw PacketTunnelError.invalidConfiguration("Shared secret is required.")
         }
 
-        if let cdnEdgeValidationError = configuration.cdnEdgeValidationError {
-            NSLog("[PHANTOM] EXT: ❌ Invalid CDN edge '\(configuration.normalizedCDNEdge)'")
-            SharedTunnelLogStore.append("[EXT] ❌ \(cdnEdgeValidationError)")
-            throw PacketTunnelError.invalidConfiguration(cdnEdgeValidationError)
+        if let advancedValidationError = configuration.advancedValidationError {
+            NSLog("[PHANTOM] EXT: ❌ Invalid advanced tunnel configuration")
+            SharedTunnelLogStore.append("[EXT] ❌ \(advancedValidationError)")
+            throw PacketTunnelError.invalidConfiguration(advancedValidationError)
         }
 
         return configuration

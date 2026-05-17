@@ -53,6 +53,15 @@ struct Cli {
     #[arg(long, default_value = "40")]
     fragment_size: usize,
 
+    /// TLS profile: default or browser-like.
+    /// "browser-like" advertises ALPN h2,http/1.1 and sends browser-ish HTTP headers.
+    #[arg(long, default_value = "default")]
+    tls_profile: String,
+
+    /// Shortcut for --transport stealth --tls-profile browser-like.
+    #[arg(long)]
+    stealth: bool,
+
     /// Disable traffic padding.
     /// By default, messages are padded to fixed block sizes to prevent
     /// DPI from fingerprinting the tunnel by message size patterns.
@@ -64,7 +73,19 @@ fn parse_transport(s: &str) -> phantom_client::TransportMode {
     match s.to_lowercase().as_str() {
         "ws" | "websocket" => phantom_client::TransportMode::WebSocket,
         "http" | "poll" | "polling" => phantom_client::TransportMode::Http,
+        "stealth" | "browser" | "browser-like" | "browser_like" => {
+            phantom_client::TransportMode::Stealth
+        }
         _ => phantom_client::TransportMode::Auto,
+    }
+}
+
+fn parse_tls_profile(s: &str) -> phantom_client::TlsProfile {
+    match s.to_lowercase().as_str() {
+        "browser" | "browser-like" | "browser_like" | "chrome" => {
+            phantom_client::TlsProfile::BrowserLike
+        }
+        _ => phantom_client::TlsProfile::Default,
     }
 }
 
@@ -73,17 +94,30 @@ async fn main() {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 
+    let transport = if cli.stealth {
+        phantom_client::TransportMode::Stealth
+    } else {
+        parse_transport(&cli.transport)
+    };
+    let tls_profile = if cli.stealth || matches!(transport, phantom_client::TransportMode::Stealth)
+    {
+        phantom_client::TlsProfile::BrowserLike
+    } else {
+        parse_tls_profile(&cli.tls_profile)
+    };
+
     let config = phantom_client::ClientConfig {
         server_url: cli.server,
         secret: cli.secret,
         listen: cli.listen,
-        transport: parse_transport(&cli.transport),
+        transport,
         cdn_edge: cli.cdn_edge,
         host_override: cli.host,
         fragment: cli.fragment,
         fragment_size: cli.fragment_size,
         padding: !cli.no_padding,
         sni_override: cli.sni,
+        tls_profile,
         ..Default::default()
     };
 

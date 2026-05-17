@@ -128,7 +128,10 @@ pub fn reconstruct_secret(fragments: &[KOfNFragment]) -> Result<Vec<u8>, &'stati
             || fragment.share_data.len() != first.payload_len
             || fragment.share_index == 0
             || fragment.share_index > fragment.total_shares
-            || fragment.share_data.iter().any(|value| usize::from(*value) >= FIELD_PRIME as usize)
+            || fragment
+                .share_data
+                .iter()
+                .any(|value| usize::from(*value) >= FIELD_PRIME as usize)
         {
             return Err("incompatible fragments");
         }

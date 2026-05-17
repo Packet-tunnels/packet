@@ -16,7 +16,8 @@ object TunnelActions {
 enum class TunnelTransportMode(val rawValue: Int, val title: String) {
     AUTO(0, "Auto"),
     WEBSOCKET(1, "WebSocket"),
-    HTTP(2, "HTTP");
+    HTTP(2, "HTTP"),
+    STEALTH(3, "Stealth");
 
     companion object {
         fun fromRawValue(value: Int): TunnelTransportMode {
@@ -104,8 +105,12 @@ data class TunnelConfiguration(
             normalizedHostOverride.isNotEmpty() ||
             normalizedSniOverride.isNotEmpty()
 
+    val usesAdvancedStart: Boolean
+        get() = usesCdn || transportMode != TunnelTransportMode.AUTO || fragmentEnabled
+
     val ingressLabel: String
         get() = when {
+            transportMode == TunnelTransportMode.STEALTH -> "Stealth TLS"
             normalizedSniOverride.isNotEmpty() -> "SNI fronting"
             normalizedCdnEdge.isNotEmpty() || normalizedHostOverride.isNotEmpty() -> "CDN relay"
             else -> "Standard endpoint"
@@ -221,6 +226,12 @@ data class TunnelConfiguration(
                 !normalizedServerUrl.startsWith("https://", ignoreCase = true)
             ) {
                 return "SNI override requires an https:// server URL."
+            }
+
+            if (transportMode == TunnelTransportMode.STEALTH &&
+                !normalizedServerUrl.startsWith("https://", ignoreCase = true)
+            ) {
+                return "Stealth transport requires an https:// server URL."
             }
 
             return null

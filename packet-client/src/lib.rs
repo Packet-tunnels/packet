@@ -36,7 +36,7 @@ use tracing::{error, info, warn};
 use url::Url;
 
 // Re-export for external use
-pub use transport::TransportMode;
+pub use transport::{TlsProfile, TransportMode};
 
 // ─── Client Configuration ──────────────────────────────────────
 
@@ -69,6 +69,8 @@ pub struct ClientConfig {
     pub sni_override: Option<String>,
     /// Mesh bootstrap metadata (bridges + peers) for stats and routing heuristics
     pub mesh_bootstrap: Option<MeshBootstrapConfig>,
+    /// TLS and HTTP profile used by advanced bypass transports.
+    pub tls_profile: TlsProfile,
 }
 
 impl Default for ClientConfig {
@@ -86,6 +88,7 @@ impl Default for ClientConfig {
             padding: true,
             sni_override: None,
             mesh_bootstrap: None,
+            tls_profile: TlsProfile::Default,
         }
     }
 }
@@ -119,6 +122,7 @@ fn runtime_transport_label(mode: &TransportMode) -> &'static str {
         TransportMode::Http => "HTTP",
         TransportMode::WebSocket => "WebSocket",
         TransportMode::Auto => "Auto",
+        TransportMode::Stealth => "Stealth",
     }
 }
 
@@ -348,6 +352,7 @@ pub async fn start_client_with_listener(
     info!("[PHANTOM] Phantom Client v0.2.0 starting");
     info!("[PHANTOM] Server: {}", server_url);
     info!("[PHANTOM] Transport: {:?}", config.transport);
+    info!("[PHANTOM] TLS profile: {:?}", config.tls_profile);
     info!("[PHANTOM] SOCKS5 proxy: {}", config.listen);
     info!(
         "[PHANTOM] Padding: {}",
@@ -399,6 +404,11 @@ pub async fn start_client_with_listener(
         fragment_enabled: config.fragment,
         fragment_size: config.fragment_size,
         spki_pins: selected_bridge_pins(&config, &server_url),
+        tls_profile: if matches!(config.transport, TransportMode::Stealth) {
+            TlsProfile::BrowserLike
+        } else {
+            config.tls_profile.clone()
+        },
     };
 
     // Spawn the transport loop (WebSocket, HTTP, or Auto)
@@ -489,14 +499,24 @@ fn selected_bridge_pins(config: &ClientConfig, server_url: &str) -> Vec<String> 
 
     active_bridge_id
         .as_deref()
-        .and_then(|bridge_id| bootstrap.bridges.iter().find(|bridge| bridge.id == bridge_id))
+        .and_then(|bridge_id| {
+            bootstrap
+                .bridges
+                .iter()
+                .find(|bridge| bridge.id == bridge_id)
+        })
         .or_else(|| {
             bootstrap
                 .bridges
                 .iter()
                 .find(|bridge| bridge.base_url.trim_end_matches('/') == normalized_server_url)
         })
-        .or_else(|| bootstrap.bridges.iter().find(|bridge| !bridge.spki_pins.is_empty()))
+        .or_else(|| {
+            bootstrap
+                .bridges
+                .iter()
+                .find(|bridge| !bridge.spki_pins.is_empty())
+        })
         .map(|bridge| bridge.spki_pins.clone())
         .unwrap_or_default()
 }

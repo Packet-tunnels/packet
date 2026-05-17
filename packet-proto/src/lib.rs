@@ -722,11 +722,8 @@ mod tests {
     #[test]
     fn test_fragment_rejects_duplicate_share_indices() {
         let fragments = fragment::split_secret_shares(b"small-image", 2, 3).unwrap();
-        let error = fragment::reconstruct_secret(&[
-            fragments[0].clone(),
-            fragments[0].clone(),
-        ])
-        .unwrap_err();
+        let error = fragment::reconstruct_secret(&[fragments[0].clone(), fragments[0].clone()])
+            .unwrap_err();
         assert_eq!(error, "duplicate fragment share index");
     }
 }

@@ -28,6 +28,20 @@ int32_t phantom_start_cdn(
     int32_t transport_mode
 );
 
+// Full bypass start: CDN edge + Host + SNI + TLS fragmentation + TLS profile
+int32_t phantom_start_full(
+    const char *server_url,
+    const char *secret,
+    uint16_t listen_port,
+    const char *cdn_edge,
+    const char *host_override,
+    const char *sni_override,
+    int32_t transport_mode,
+    int32_t fragment_enabled,
+    uint32_t fragment_size,
+    int32_t tls_profile
+);
+
 // Native Packet mesh start
 int32_t phantom_start_mesh(
     const char *config_json,

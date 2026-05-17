@@ -414,7 +414,7 @@ class TunnelVpnService : VpnService() {
 
     private fun startRustCore(configuration: TunnelConfiguration): Int {
         val listenPort = configuration.listenPortValue ?: 0
-        return if (configuration.usesCdn) {
+        return if (configuration.usesAdvancedStart) {
             PacketBridge.startClientFull(
                 configuration.normalizedServerUrl,
                 configuration.normalizedSecret,

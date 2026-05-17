@@ -19,7 +19,6 @@ use crate::{
     dispatch_downstream, mesh, process_upstream_msg, set_runtime_connected, set_runtime_last_error,
     set_runtime_ping, set_runtime_state, tls_fragment::FragmentStream, TunnelState, UpstreamMsg,
 };
-use webpki::EndEntityCert;
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
 use reqwest::header::HOST;
@@ -36,14 +35,14 @@ use tokio_rustls::rustls::client::danger::{
 };
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{
-    client::WebPkiServerVerifier,
-    CertificateError, ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore,
-    SignatureScheme,
+    client::WebPkiServerVerifier, CertificateError, ClientConfig as RustlsClientConfig,
+    DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, info, warn};
+use webpki::EndEntityCert;
 
 // ─── Transport Configuration ──────────────────────────────────
 
@@ -52,6 +51,14 @@ pub enum TransportMode {
     Http,
     WebSocket,
     Auto,
+    /// Browser-like HTTPS POST transport for stricter DPI environments.
+    Stealth,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TlsProfile {
+    Default,
+    BrowserLike,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +80,8 @@ pub struct TransportConfig {
     pub fragment_size: usize,
     /// SPKI SHA-256 pins for the selected bridge descriptor
     pub spki_pins: Vec<String>,
+    /// TLS and HTTP header shaping profile.
+    pub tls_profile: TlsProfile,
 }
 
 impl TransportConfig {
@@ -203,6 +212,10 @@ impl TransportConfig {
             self.host_value()
         }
     }
+
+    fn uses_browser_like_tls(&self) -> bool {
+        self.tls_profile == TlsProfile::BrowserLike || matches!(self.mode, TransportMode::Stealth)
+    }
 }
 
 #[derive(Debug)]
@@ -221,13 +234,20 @@ impl PinnedServerCertVerifier {
         Ok(Self { inner, spki_pins })
     }
 
-    fn verify_spki_pin(&self, end_entity: &CertificateDer<'_>) -> Result<(), tokio_rustls::rustls::Error> {
+    fn verify_spki_pin(
+        &self,
+        end_entity: &CertificateDer<'_>,
+    ) -> Result<(), tokio_rustls::rustls::Error> {
         let parsed = EndEntityCert::try_from(end_entity).map_err(|_| {
             tokio_rustls::rustls::Error::InvalidCertificate(CertificateError::BadEncoding)
         })?;
         let actual_pin = b64_encode(&sha256(parsed.subject_public_key_info().as_ref()));
 
-        if self.spki_pins.iter().any(|expected| expected == &actual_pin) {
+        if self
+            .spki_pins
+            .iter()
+            .any(|expected| expected == &actual_pin)
+        {
             Ok(())
         } else {
             Err(tokio_rustls::rustls::Error::InvalidCertificate(
@@ -246,8 +266,13 @@ impl ServerCertVerifier for PinnedServerCertVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, tokio_rustls::rustls::Error> {
-        self.inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)?;
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
         self.verify_spki_pin(end_entity)?;
         Ok(ServerCertVerified::assertion())
     }
@@ -296,14 +321,27 @@ fn normalize_spki_pins(pins: &[String]) -> Vec<String> {
     normalized
 }
 
+fn apply_tls_profile(
+    mut tls_config: RustlsClientConfig,
+    config: &TransportConfig,
+) -> RustlsClientConfig {
+    if config.uses_browser_like_tls() {
+        // This is not an exact Chrome/uTLS ClientHello, but it matches the
+        // critical browser ALPN set used by fronted HTTPS POST transports.
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    }
+    tls_config
+}
+
 fn build_tls_client_config(config: &TransportConfig) -> Result<RustlsClientConfig, String> {
     let mut root_store = RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
     if config.spki_pins.is_empty() {
-        return Ok(RustlsClientConfig::builder()
+        let tls_config = RustlsClientConfig::builder()
             .with_root_certificates(root_store)
-            .with_no_client_auth());
+            .with_no_client_auth();
+        return Ok(apply_tls_profile(tls_config, config));
     }
 
     let verifier = WebPkiServerVerifier::builder(Arc::new(root_store))
@@ -311,10 +349,11 @@ fn build_tls_client_config(config: &TransportConfig) -> Result<RustlsClientConfi
         .map_err(|error| format!("packet bridge verifier init failed: {}", error))?;
     let verifier = Arc::new(PinnedServerCertVerifier::new(verifier, &config.spki_pins)?);
 
-    Ok(RustlsClientConfig::builder()
+    let tls_config = RustlsClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth())
+        .with_no_client_auth();
+    Ok(apply_tls_profile(tls_config, config))
 }
 
 // ─── Transport Runner ──────────────────────────────────────────
@@ -330,6 +369,9 @@ pub async fn run_transport(
         }
         TransportMode::Http => {
             run_http_loop(config, upstream_rx, tunnel_state).await;
+        }
+        TransportMode::Stealth => {
+            run_stealth_loop(config, upstream_rx, tunnel_state).await;
         }
         TransportMode::Auto => {
             run_auto_loop(config, upstream_rx, tunnel_state).await;
@@ -745,6 +787,10 @@ async fn run_http_loop(
         client_builder = client_builder.resolve(&request_host, connect_addr);
     }
 
+    if config.uses_browser_like_tls() {
+        info!("[PHANTOM] Browser-like TLS profile enabled: ALPN=h2,http/1.1 headers=Chrome-like");
+    }
+
     let http_client = client_builder.build().expect("failed to build HTTP client");
 
     // Authenticate with server
@@ -832,6 +878,7 @@ async fn run_http_loop(
         if let Some(host) = config.http_host_header() {
             request = request.header(HOST, host);
         }
+        request = apply_browser_like_http_headers(request, &config);
 
         match request.json(&req_body).send().await {
             Ok(resp) => {
@@ -924,6 +971,26 @@ async fn run_http_loop(
     }
 }
 
+async fn run_stealth_loop(
+    mut config: TransportConfig,
+    upstream_rx: mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: Arc<Mutex<TunnelState>>,
+) {
+    config.tls_profile = TlsProfile::BrowserLike;
+    if !config.is_tls() {
+        let message = "Stealth mode requires an https:// server URL";
+        mesh::set_status("failed");
+        mesh::set_last_error(message.to_string());
+        set_runtime_state("failed");
+        set_runtime_last_error(message);
+        error!("[PHANTOM] ❌ {}", message);
+        return;
+    }
+
+    info!("[PHANTOM] Stealth mode: HTTPS POST/polling with browser-like TLS profile");
+    run_http_loop(config, upstream_rx, tunnel_state).await;
+}
+
 /// HTTP authentication — POST to /api/v1/auth/login
 async fn http_authenticate(
     client: &Client,
@@ -939,6 +1006,7 @@ async fn http_authenticate(
     if let Some(host) = host_header.as_ref() {
         request = request.header(HOST, host);
     }
+    request = apply_browser_like_http_headers(request, config);
 
     let resp = request
         .json(&body)
@@ -985,8 +1053,15 @@ async fn http_authenticate(
         .ok_or_else(|| "no token in response".to_string())
 }
 
-fn build_transport_auth_request(config: &TransportConfig, default_mode: Option<&str>) -> AuthRequest {
-    if let Some(ticket) = config.auth_ticket.as_ref().filter(|ticket| !ticket.trim().is_empty()) {
+fn build_transport_auth_request(
+    config: &TransportConfig,
+    default_mode: Option<&str>,
+) -> AuthRequest {
+    if let Some(ticket) = config
+        .auth_ticket
+        .as_ref()
+        .filter(|ticket| !ticket.trim().is_empty())
+    {
         build_ticket_auth_request(
             ticket.clone(),
             default_mode.map(|mode| mode.to_string()),
@@ -995,6 +1070,31 @@ fn build_transport_auth_request(config: &TransportConfig, default_mode: Option<&
     } else {
         build_auth_request(&config.secret)
     }
+}
+
+fn apply_browser_like_http_headers(
+    request: reqwest::RequestBuilder,
+    config: &TransportConfig,
+) -> reqwest::RequestBuilder {
+    if !config.uses_browser_like_tls() {
+        return request;
+    }
+
+    request
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        )
+        .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
+        .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,fa;q=0.8")
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .header("Pragma", "no-cache")
+        .header("Sec-CH-UA", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        .header("Sec-CH-UA-Mobile", "?0")
+        .header("Sec-CH-UA-Platform", "\"Windows\"")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-origin")
 }
 
 // ═══════════════════════════════════════════════════════════════

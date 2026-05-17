@@ -153,7 +153,10 @@ pub fn record_forward(peer_id: &str, latency_ms: u64) {
 }
 
 /// Get all peers with trust score above threshold, sorted by trust descending.
-pub fn trusted_peers_sorted(peers: &[PacketPeerDescriptor], min_trust: f32) -> Vec<PacketPeerDescriptor> {
+pub fn trusted_peers_sorted(
+    peers: &[PacketPeerDescriptor],
+    min_trust: f32,
+) -> Vec<PacketPeerDescriptor> {
     let mut scored: Vec<_> = peers
         .iter()
         .map(|p| (combined_trust(p), p.clone()))

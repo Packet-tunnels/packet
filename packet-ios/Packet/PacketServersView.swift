@@ -207,6 +207,29 @@ private struct ConfigurationEditorSheet: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
+
+                    HStack {
+                        Text("SNI Override")
+                        Spacer()
+                        TextField("Optional", text: $draftConfiguration.sniOverride)
+                            .multilineTextAlignment(.trailing)
+                            .foregroundStyle(.secondary)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+
+                    Toggle("TLS Fragmentation", isOn: $draftConfiguration.fragmentEnabled)
+
+                    if draftConfiguration.fragmentEnabled {
+                        HStack {
+                            Text("Fragment Size")
+                            Spacer()
+                            TextField("40", text: $draftConfiguration.fragmentSize)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } header: {
                     Text("Advanced")
                 } footer: {
@@ -239,12 +262,12 @@ private struct ConfigurationEditorSheet: View {
     }
 
     private var canSave: Bool {
-        draftConfiguration.cdnEdgeValidationError == nil
+        draftConfiguration.advancedValidationError == nil
     }
 
     private func saveConfiguration() {
-        if let cdnEdgeValidationError = draftConfiguration.cdnEdgeValidationError {
-            settingsError = cdnEdgeValidationError
+        if let advancedValidationError = draftConfiguration.advancedValidationError {
+            settingsError = advancedValidationError
             return
         }
 

@@ -1,4 +1,6 @@
-use crate::{bind_socks_listener, mesh, start_client_with_listener, ClientConfig, TransportMode};
+use crate::{
+    bind_socks_listener, mesh, start_client_with_listener, ClientConfig, TlsProfile, TransportMode,
+};
 use phantom_proto::{MeshBootstrapConfig, PacketPeerDescriptor};
 use serde::Deserialize;
 use std::ffi::{CStr, CString};
@@ -47,6 +49,8 @@ struct MeshStartRequest {
     fragment_size: Option<usize>,
     #[serde(default)]
     bootstrap: Option<MeshBootstrapConfig>,
+    #[serde(default)]
+    tls_profile: Option<String>,
 }
 
 lazy_static::lazy_static! {
@@ -214,7 +218,10 @@ fn spawn_client_with_bound_listener(config: ClientConfig, listener: std::net::Tc
         });
     });
 
-    *ACTIVE_CLIENT.lock().unwrap() = Some(ActiveClient { shutdown_tx, handle });
+    *ACTIVE_CLIENT.lock().unwrap() = Some(ActiveClient {
+        shutdown_tx,
+        handle,
+    });
 
     i32::from(actual_port)
 }
@@ -403,11 +410,7 @@ pub extern "C" fn phantom_start_cdn(
         }
     };
 
-    let transport = match transport_mode {
-        1 => TransportMode::WebSocket,
-        2 => TransportMode::Http,
-        _ => TransportMode::Auto,
-    };
+    let transport = parse_transport_mode_value(transport_mode);
 
     init_logging();
     let (listener, listen_addr, _) = match bind_requested_or_auto_listener(listen_port) {
@@ -422,15 +425,99 @@ pub extern "C" fn phantom_start_cdn(
         server_url: url,
         secret: sec,
         listen: listen_addr,
-        transport,
+        transport: transport.clone(),
         cdn_edge: edge,
         host_override: host,
-        fragment: false,    // <-- REVERTED: Fragmenting TLS to a WAF often triggers Slowloris protection
+        fragment: false, // <-- REVERTED: Fragmenting TLS to a WAF often triggers Slowloris protection
         fragment_size: 40,
         padding: true,
         sni_override: None,
         auth_ticket: None,
         mesh_bootstrap: None,
+        tls_profile: tls_profile_for_transport(&transport),
+    };
+
+    spawn_client_with_bound_listener(config, listener)
+}
+
+/// Full start for iOS/general FFI: CDN edge + host + SNI + fragmentation + TLS profile.
+#[no_mangle]
+pub extern "C" fn phantom_start_full(
+    server_url: *const c_char,
+    secret: *const c_char,
+    listen_port: u16,
+    cdn_edge: *const c_char,
+    host_override: *const c_char,
+    sni_override: *const c_char,
+    transport_mode: i32,
+    fragment_enabled: i32,
+    fragment_size: u32,
+    tls_profile: i32,
+) -> i32 {
+    let url = unsafe {
+        if server_url.is_null() {
+            return -1;
+        }
+        CStr::from_ptr(server_url).to_string_lossy().into_owned()
+    };
+
+    let sec = unsafe {
+        if secret.is_null() {
+            return -1;
+        }
+        CStr::from_ptr(secret).to_string_lossy().into_owned()
+    };
+
+    let edge = unsafe {
+        if cdn_edge.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(cdn_edge).to_string_lossy().into_owned())
+        }
+    };
+
+    let host = unsafe {
+        if host_override.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(host_override).to_string_lossy().into_owned())
+        }
+    };
+
+    let sni = unsafe {
+        if sni_override.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(sni_override).to_string_lossy().into_owned())
+        }
+    };
+
+    let transport = parse_transport_mode_value(transport_mode);
+    let requested_tls_profile = parse_tls_profile_value(tls_profile);
+
+    init_logging();
+    let (listener, listen_addr, _) = match bind_requested_or_auto_listener(listen_port) {
+        Ok(bound) => bound,
+        Err(e) => {
+            tracing::error!("[PHANTOM] ❌ {}", e);
+            return -2;
+        }
+    };
+
+    let config = ClientConfig {
+        server_url: url,
+        secret: sec,
+        listen: listen_addr,
+        transport: transport.clone(),
+        cdn_edge: edge,
+        host_override: host,
+        sni_override: sni,
+        fragment: fragment_enabled != 0,
+        fragment_size: fragment_size as usize,
+        padding: true,
+        auth_ticket: None,
+        mesh_bootstrap: None,
+        tls_profile: requested_tls_profile.unwrap_or_else(|| tls_profile_for_transport(&transport)),
     };
 
     spawn_client_with_bound_listener(config, listener)
@@ -575,10 +662,7 @@ pub mod android {
             let payload = peers_json.try_to_string(env)?;
             let peers: Vec<PacketPeerDescriptor> =
                 serde_json::from_str(&payload).map_err(|error| {
-                    tracing::error!(
-                        "[PHANTOM] ❌ mesh peer payload parse failed: {}",
-                        error
-                    );
+                    tracing::error!("[PHANTOM] ❌ mesh peer payload parse failed: {}", error);
                     jni::errors::Error::JniCall(jni::errors::JniError::InvalidArguments)
                 })?;
             mesh::import_peers(peers);
@@ -605,14 +689,18 @@ pub mod android {
             let edge_str = cdn_edge.try_to_string(env).unwrap_or_default();
             let host_str = host_override.try_to_string(env).unwrap_or_default();
 
-            let edge = if edge_str.is_empty() { None } else { Some(edge_str) };
-            let host = if host_str.is_empty() { None } else { Some(host_str) };
-
-            let transport = match transport_mode {
-                1 => TransportMode::WebSocket,
-                2 => TransportMode::Http,
-                _ => TransportMode::Auto,
+            let edge = if edge_str.is_empty() {
+                None
+            } else {
+                Some(edge_str)
             };
+            let host = if host_str.is_empty() {
+                None
+            } else {
+                Some(host_str)
+            };
+
+            let transport = parse_transport_mode_value(transport_mode);
             init_logging();
             let (listener, listen_addr, _actual_port) =
                 match bind_requested_or_auto_listener(listen_port as u16) {
@@ -627,15 +715,16 @@ pub mod android {
                 server_url: url,
                 secret: sec,
                 listen: listen_addr,
-                transport,
+                transport: transport.clone(),
                 cdn_edge: edge,
                 host_override: host,
-                fragment: false,    // <-- REVERTED: Fragmenting TLS to a WAF often triggers Slowloris protection
+                fragment: false, // <-- REVERTED: Fragmenting TLS to a WAF often triggers Slowloris protection
                 fragment_size: 40,
                 padding: true,
                 sni_override: None,
                 auth_ticket: None,
                 mesh_bootstrap: None,
+                tls_profile: tls_profile_for_transport(&transport),
             };
 
             Ok(spawn_client_with_bound_listener(config, listener) as jint)
@@ -666,15 +755,23 @@ pub mod android {
             let host_str = host_override.try_to_string(env).unwrap_or_default();
             let sni_str = sni_override.try_to_string(env).unwrap_or_default();
 
-            let edge = if edge_str.is_empty() { None } else { Some(edge_str) };
-            let host = if host_str.is_empty() { None } else { Some(host_str) };
-            let sni = if sni_str.is_empty() { None } else { Some(sni_str) };
-
-            let transport = match transport_mode {
-                1 => TransportMode::WebSocket,
-                2 => TransportMode::Http,
-                _ => TransportMode::Auto,
+            let edge = if edge_str.is_empty() {
+                None
+            } else {
+                Some(edge_str)
             };
+            let host = if host_str.is_empty() {
+                None
+            } else {
+                Some(host_str)
+            };
+            let sni = if sni_str.is_empty() {
+                None
+            } else {
+                Some(sni_str)
+            };
+
+            let transport = parse_transport_mode_value(transport_mode);
             init_logging();
             let (listener, listen_addr, _actual_port) =
                 match bind_requested_or_auto_listener(listen_port as u16) {
@@ -689,7 +786,7 @@ pub mod android {
                 server_url: url,
                 secret: sec,
                 listen: listen_addr,
-                transport,
+                transport: transport.clone(),
                 cdn_edge: edge,
                 host_override: host,
                 sni_override: sni,
@@ -698,12 +795,10 @@ pub mod android {
                 padding: true,
                 auth_ticket: None,
                 mesh_bootstrap: None,
+                tls_profile: tls_profile_for_transport(&transport),
             };
 
-            tracing::info!(
-                "[PHANTOM] startClientFull: SNI={:?}",
-                config.sni_override
-            );
+            tracing::info!("[PHANTOM] startClientFull: SNI={:?}", config.sni_override);
 
             Ok(spawn_client_with_bound_listener(config, listener) as jint)
         })
@@ -759,8 +854,8 @@ pub mod android {
 }
 
 fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32, String> {
-    let request: MeshStartRequest =
-        serde_json::from_str(payload).map_err(|error| format!("Invalid mesh config JSON: {}", error))?;
+    let request: MeshStartRequest = serde_json::from_str(payload)
+        .map_err(|error| format!("Invalid mesh config JSON: {}", error))?;
 
     if request.ticket.trim().is_empty() {
         return Err("Mesh ticket missing".to_string());
@@ -775,12 +870,19 @@ fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32,
     let (listener, listen_addr, _actual_port) =
         bind_requested_or_auto_listener(requested_port).map_err(|error| error.to_string())?;
 
+    let transport = parse_transport_mode(request.transport_mode.as_deref());
+    let tls_profile = request
+        .tls_profile
+        .as_deref()
+        .and_then(parse_tls_profile_name)
+        .unwrap_or_else(|| tls_profile_for_transport(&transport));
+
     let config = ClientConfig {
         server_url: request.server_url,
         secret: String::new(),
         auth_ticket: Some(request.ticket),
         listen: listen_addr,
-        transport: parse_transport_mode(request.transport_mode.as_deref()),
+        transport,
         cdn_edge: request.cdn_edge,
         host_override: request.host_override,
         fragment: request.fragment,
@@ -788,6 +890,7 @@ fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32,
         padding: true,
         sni_override: request.sni_override,
         mesh_bootstrap: request.bootstrap,
+        tls_profile,
     };
 
     Ok(spawn_client_with_bound_listener(config, listener))
@@ -797,6 +900,40 @@ fn parse_transport_mode(value: Option<&str>) -> TransportMode {
     match value.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
         "ws" | "websocket" => TransportMode::WebSocket,
         "http" => TransportMode::Http,
+        "stealth" | "browser" | "browser-like" | "browser_like" => TransportMode::Stealth,
         _ => TransportMode::Auto,
+    }
+}
+
+fn parse_transport_mode_value(value: i32) -> TransportMode {
+    match value {
+        1 => TransportMode::WebSocket,
+        2 => TransportMode::Http,
+        3 => TransportMode::Stealth,
+        _ => TransportMode::Auto,
+    }
+}
+
+fn tls_profile_for_transport(transport: &TransportMode) -> TlsProfile {
+    if matches!(transport, TransportMode::Stealth) {
+        TlsProfile::BrowserLike
+    } else {
+        TlsProfile::Default
+    }
+}
+
+fn parse_tls_profile_value(value: i32) -> Option<TlsProfile> {
+    match value {
+        0 => Some(TlsProfile::Default),
+        1 => Some(TlsProfile::BrowserLike),
+        _ => None,
+    }
+}
+
+fn parse_tls_profile_name(value: &str) -> Option<TlsProfile> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "default" | "rustls" => Some(TlsProfile::Default),
+        "browser" | "browser-like" | "browser_like" | "chrome" => Some(TlsProfile::BrowserLike),
+        _ => None,
     }
 }

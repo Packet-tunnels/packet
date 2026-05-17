@@ -37,10 +37,10 @@ pub fn generate_cover_payload() -> Vec<u8> {
     let mut rng = rand::thread_rng();
     // Cover payloads use the same size distribution as real fragments
     let size = match rng.gen_range(0u8..100) {
-        0..=60 => 512,       // Small — matches text fragments
-        61..=85 => 4096,     // Medium
-        86..=95 => 16384,    // Large — matches voice note fragments
-        _ => 65536,          // XL — matches image fragments
+        0..=60 => 512,    // Small — matches text fragments
+        61..=85 => 4096,  // Medium
+        86..=95 => 16384, // Large — matches voice note fragments
+        _ => 65536,       // XL — matches image fragments
     };
     let mut payload = vec![0u8; size];
     rng.fill(&mut payload[..]);

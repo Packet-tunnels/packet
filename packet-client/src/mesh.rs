@@ -158,7 +158,10 @@ pub fn stats_json() -> Option<String> {
 }
 
 pub fn ticket_transport_key(ticket: &str) -> Option<[u8; 32]> {
-    decode_transport_ticket(ticket).ok()?.session_key_bytes().ok()
+    decode_transport_ticket(ticket)
+        .ok()?
+        .session_key_bytes()
+        .ok()
 }
 
 fn snapshot_from_state(state: &MeshControllerState) -> MeshStatsSnapshot {

@@ -86,6 +86,19 @@ cargo build --release -p phantom-bridge
   --sni "allowed-site.ir"
 ```
 
+### Client (Stealth HTTPS profile)
+```bash
+# Browser-like HTTPS POST transport for networks that allow fronted TLS/H2
+# but block classic WebSocket upgrades.
+./phantom-stealth-client \
+  --server https://piano-lessons.site \
+  --secret "your-shared-secret" \
+  --listen 127.0.0.1:1080 \
+  --cdn-edge "104.16.132.229:2053" \
+  --host "piano-lessons.site" \
+  --sni "allowed-site.ir"
+```
+
 ### Bridge (on domestic VPS)
 ```bash
 # Run on a VPS inside the censored country
@@ -121,6 +134,7 @@ chmod +x phantom-client-android
 | **WebSocket** | `--transport ws` | CDN bypass, persistent connection, recommended for Iran |
 | **HTTP Polling** | `--transport http` | Direct connections, fallback mode |
 | **Auto** | `--transport auto` | Tries WebSocket first, falls back to HTTP (default) |
+| **Stealth** | `--transport stealth` or `phantom-stealth-client` | HTTPS POST/polling with browser-like ALPN and headers |
 
 ## CDN Bypass Setup (ArvanCloud)
 
