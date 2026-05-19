@@ -38,6 +38,10 @@ const CHROME_CIPHER_LIST: &str = concat!(
     "AES256-SHA"
 );
 
+/// Chrome/BoringSSL supported-group order for the non-PQ profile used by
+/// v2ray/sing-box `fp=chrome` profiles on older Android builds.
+const CHROME_CURVES_LIST: &str = "X25519:P-256:P-384:P-521";
+
 /// Build the ALPN wire format (`len`-prefixed protocol list) BoringSSL wants.
 fn alpn_wire(alpn: &[&[u8]]) -> Vec<u8> {
     let mut wire = Vec::new();
@@ -63,13 +67,20 @@ where
     builder.set_verify(SslVerifyMode::NONE);
 
     // GREASE is the single biggest Chrome JA3 tell — BoringSSL implements it
-    // the same way Chrome does.
+    // the same way Chrome does. The extra extension knobs keep the handshake
+    // from collapsing into a static non-browser BoringSSL template.
     builder.set_grease_enabled(true);
+    builder.set_permute_extensions(true);
+    builder.enable_ocsp_stapling();
+    builder.enable_signed_cert_timestamps();
 
-    // Chrome cipher ordering for TLS 1.2.
+    // Chrome cipher and supported-group ordering for TLS 1.2.
     builder
         .set_cipher_list(CHROME_CIPHER_LIST)
         .map_err(|e| format!("boring set_cipher_list failed: {}", e))?;
+    builder
+        .set_curves_list(CHROME_CURVES_LIST)
+        .map_err(|e| format!("boring set_curves_list failed: {}", e))?;
 
     // ALPN exactly as the caller wants (Chrome sends h2,http/1.1).
     let wire = alpn_wire(alpn);

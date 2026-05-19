@@ -60,7 +60,7 @@ object PacketDefaultProfiles {
     const val CHAIN_OBFS_KEY = ""
     const val CHAIN_TROJAN_URI =
         "trojan://humanity@172.64.152.23:443?path=%2Fassignment&security=tls" +
-            "&host=www.creationlong.org&type=ws&sni=www.creationlong.org#%40InfoTech_VK"
+            "&host=www.creationlong.org&type=ws&sni=www.creationlong.org&fp=chrome#%40InfoTech_VK"
 
     fun chainConfiguration(): TunnelConfiguration {
         return TunnelConfiguration(
