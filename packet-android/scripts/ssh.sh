@@ -10,10 +10,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SECRET_FILE="${SECRET_FILE:-${REPO_ROOT}/.packet-private.env}"
 
 # EDIT THESE:
-VPS_HOST="${VPS_HOST:-PUT_IRAN_VPS_IP_HERE}"
+VPS_HOST="${VPS_HOST:-37.152.187.106}"
 VPS_USER="${VPS_USER:-root}"
 VPS_SSH_PORT="${VPS_SSH_PORT:-22}"
-VPS_PASSWORD="${VPS_PASSWORD:-}" # optional; if empty, ssh key / manual password prompt is used
+VPS_PASSWORD="${VPS_PASSWORD:-vqIZSRXqAd}" # optional; if empty, ssh key / manual password prompt is used
 
 REMOTE_BIND="${REMOTE_BIND:-0.0.0.0}"
 REMOTE_PORT="${REMOTE_PORT:-80}"
