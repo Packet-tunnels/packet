@@ -189,8 +189,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             NSLog("[PHANTOM] EXT: Config - stack=directsock_trojan uri='\(configuration.normalizedTrojanCarrierURI)' localPort='\(configuration.carrierProxyPort)'")
             SharedTunnelLogStore.append("[EXT] Config loaded: DirectSock=\(configuration.endpointHost):\(configuration.endpointPort) port=\(configuration.carrierProxyPort)")
         } else {
-            NSLog("[PHANTOM] EXT: Config - URL='\(configuration.normalizedServerURL)' secretLen=\(configuration.normalizedSecret.count) port='\(configuration.listenPort)'")
-            SharedTunnelLogStore.append("[EXT] Config loaded: URL='\(configuration.normalizedServerURL)' port=\(configuration.listenPort)")
+            let upstreamLabel = configuration.normalizedUpstreamProxy.isEmpty ? "(none)" : redactedProxy(configuration.normalizedUpstreamProxy)
+            NSLog("[PHANTOM] EXT: Config - URL='\(configuration.normalizedServerURL)' secretLen=\(configuration.normalizedSecret.count) port='\(configuration.listenPort)' transport=\(configuration.transportMode.title) upstream='\(upstreamLabel)'")
+            SharedTunnelLogStore.append("[EXT] Config loaded: URL='\(configuration.normalizedServerURL)' transport=\(configuration.transportMode.title) port=\(configuration.listenPort) upstream=\(upstreamLabel)")
         }
 
         if let validationError = configuration.validationError {
@@ -722,6 +723,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         return String(cString: strerror(errno))
+    }
+
+    private func redactedProxy(_ value: String) -> String {
+        guard var components = URLComponents(string: value) else {
+            return "(invalid)"
+        }
+        if components.user != nil {
+            components.user = "user"
+        }
+        if components.password != nil {
+            components.password = "redacted"
+        }
+        return components.string ?? "(invalid)"
     }
 
     private func makeProxyAutoConfigurationScript(

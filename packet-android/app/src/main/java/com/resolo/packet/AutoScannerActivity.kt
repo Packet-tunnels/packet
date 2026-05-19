@@ -306,7 +306,8 @@ class AutoScannerActivity : Activity() {
                     profile.transportMode.rawValue,
                     profile.fragmentEnabled,
                     profile.fragmentSizeValue,
-                    profile.obfsKey
+                    profile.obfsKey,
+                    baseConfiguration!!.normalizedUpstreamProxy
                 )
 
                 resultObj.put("listenPort", listenPort)

@@ -34,7 +34,12 @@ use crate::{
     set_runtime_last_error, set_runtime_state,
 };
 
-type CarrierTlsStream = tokio_rustls::client::TlsStream<FragmentStream>;
+/// The carrier TLS stream is type-erased so the same downstream code drives
+/// either the rustls engine or the BoringSSL (Chrome-JA3) engine. Which one
+/// is used is decided per-connection by the config's `fp=` fingerprint.
+pub trait CarrierIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> CarrierIo for T {}
+type CarrierTlsStream = Box<dyn CarrierIo>;
 type CarrierWsStream = WebSocketStream<CarrierTlsStream>;
 
 #[derive(Clone, Debug)]
@@ -441,9 +446,27 @@ async fn handle_proxy_connection(
         request.destination
     );
 
-    let mut remote = connect_trojan_remote(&config).await?;
+    let mut remote = match connect_trojan_remote(&config).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            let detail = format!("DirectSock carrier connect failed: {}", error);
+            set_runtime_last_error(&detail);
+            write_http_proxy_failure(&mut local, &detail).await?;
+            return Err(detail.into());
+        }
+    };
     set_runtime_state("connecting");
-    send_trojan_connect(&mut remote, &config.endpoint.password, &request.destination).await?;
+    if let Err(error) =
+        send_trojan_connect(&mut remote, &config.endpoint.password, &request.destination).await
+    {
+        let detail = format!(
+            "DirectSock Trojan CONNECT to {} failed: {}",
+            request.destination, error
+        );
+        set_runtime_last_error(&detail);
+        write_http_proxy_failure(&mut local, &detail).await?;
+        return Err(detail.into());
+    }
     increment_runtime_active_streams();
     set_runtime_connected(None);
 
@@ -464,6 +487,31 @@ async fn handle_proxy_connection(
     let result = pump_proxy(local, remote).await;
     decrement_runtime_active_streams();
     result
+}
+
+async fn write_http_proxy_failure(
+    local: &mut TcpStream,
+    detail: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let header_detail = sanitize_http_header_value(detail, 220);
+    let response = format!(
+        "HTTP/1.1 502 DirectSock Failed\r\n\
+         Proxy-Agent: PacketCarrier\r\n\
+         X-Packet-Carrier-Error: {header_detail}\r\n\
+         Content-Length: 0\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    local.write_all(response.as_bytes()).await?;
+    Ok(())
+}
+
+fn sanitize_http_header_value(value: &str, max_len: usize) -> String {
+    value
+        .chars()
+        .filter(|ch| *ch != '\r' && *ch != '\n')
+        .take(max_len)
+        .collect()
 }
 
 async fn read_http_proxy_request(
@@ -690,26 +738,58 @@ fn normalize_host_port(target: &str, default_port: u16) -> Result<String, String
 async fn connect_trojan_remote(
     config: &TrojanCarrierConfig,
 ) -> Result<CarrierRemote, Box<dyn std::error::Error + Send + Sync>> {
+    let endpoint_already_chrome = is_chrome_fingerprint(config.endpoint.tls_fingerprint.as_deref());
+    let mut attempts = Vec::new();
+
+    // Chrome (BoringSSL) JA3 first — it is the only TLS fingerprint that
+    // survives Iran's handshake RST. The rustls "configured" path always
+    // gets reset there, so trying it first only wastes a round trip and
+    // surfaces a misleading error. Order: fragmented Chrome → unfragmented
+    // Chrome → (only off-DPI networks ever reach these) rustls fallbacks.
     if config.fragment_tls_hello {
-        match connect_trojan_remote_once(config, true).await {
-            Ok(remote) => return Ok(remote),
+        attempts.push((true, true, "fragmented Chrome TLS"));
+    }
+    attempts.push((false, true, "unfragmented Chrome TLS"));
+    if !endpoint_already_chrome {
+        if config.fragment_tls_hello {
+            attempts.push((true, false, "fragmented configured TLS (fallback)"));
+        }
+        attempts.push((false, false, "unfragmented configured TLS (fallback)"));
+    }
+
+    let mut errors = Vec::new();
+    for (fragment_tls_hello, force_chrome_tls, label) in attempts {
+        match connect_trojan_remote_once(config, fragment_tls_hello, force_chrome_tls).await {
+            Ok(remote) => {
+                if force_chrome_tls {
+                    info!(
+                        "[carrier] DirectSock connected after Chrome TLS fallback ({})",
+                        label
+                    );
+                }
+                return Ok(remote);
+            }
             Err(error) => {
-                warn!(
-                    "[carrier] fragmented DirectSock handshake failed; retrying without fragmentation: {}",
-                    error
-                );
+                let error_text = error.to_string();
+                warn!("[carrier] {} failed: {}", label, error_text);
+                errors.push(format!("{}: {}", label, error_text));
             }
         }
     }
 
-    connect_trojan_remote_once(config, false).await
+    Err(format!(
+        "all DirectSock carrier attempts failed: {}",
+        errors.join(" | ")
+    )
+    .into())
 }
 
 async fn connect_trojan_remote_once(
     config: &TrojanCarrierConfig,
     fragment_tls_hello: bool,
+    force_chrome_tls: bool,
 ) -> Result<CarrierRemote, Box<dyn std::error::Error + Send + Sync>> {
-    let tls = connect_trojan_tls(config, fragment_tls_hello).await?;
+    let tls = connect_trojan_tls(config, fragment_tls_hello, force_chrome_tls).await?;
 
     match config.endpoint.transport {
         TrojanCarrierTransport::Tcp => Ok(CarrierRemote::Tcp(tls)),
@@ -723,6 +803,7 @@ async fn connect_trojan_remote_once(
 async fn connect_trojan_tls(
     config: &TrojanCarrierConfig,
     fragment_tls_hello: bool,
+    force_chrome_tls: bool,
 ) -> Result<CarrierTlsStream, Box<dyn std::error::Error + Send + Sync>> {
     let endpoint = &config.endpoint;
     let tcp = dial_carrier_tcp(endpoint).await?;
@@ -733,6 +814,37 @@ async fn connect_trojan_tls(
     } else {
         FragmentStream::passthrough(tcp)
     };
+
+    // fp=chrome → BoringSSL Chrome-identical ClientHello (what v2ray sends,
+    // what survives Iran's JA3 RST). Anything else → rustls as before.
+    if force_chrome_tls || is_chrome_fingerprint(endpoint.tls_fingerprint.as_deref()) {
+        info!(
+            "[carrier] TLS engine: BoringSSL (Chrome JA3) sni={} forced={}",
+            endpoint.sni, force_chrome_tls
+        );
+        let alpn: Vec<&[u8]> = if endpoint.alpn_protocols.is_empty() {
+            vec![b"h2", b"http/1.1"]
+        } else {
+            endpoint
+                .alpn_protocols
+                .iter()
+                .map(|p| p.as_slice())
+                .collect()
+        };
+        let tls = tokio::time::timeout(
+            Duration::from_secs(20),
+            crate::chrome_tls::connect_chrome(tcp, &endpoint.sni, &alpn),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "carrier Chrome TLS handshake timed out: sni={}",
+                endpoint.sni
+            )
+        })?
+        .map_err(|error| format!("carrier Chrome TLS handshake failed: {}", error))?;
+        return Ok(Box::new(tls));
+    }
 
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -751,7 +863,7 @@ async fn connect_trojan_tls(
         .map_err(|_| format!("carrier TLS handshake timed out: sni={}", endpoint.sni))?
         .map_err(|error| format!("carrier TLS handshake failed: {}", error))?;
 
-    Ok(tls)
+    Ok(Box::new(tls))
 }
 
 async fn dial_carrier_tcp(

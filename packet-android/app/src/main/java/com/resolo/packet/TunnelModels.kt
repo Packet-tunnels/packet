@@ -29,7 +29,9 @@ enum class TunnelTransportMode(val rawValue: Int, val title: String) {
 
 enum class TunnelStackMode(val rawValue: Int, val title: String) {
     PACKET_NATIVE(0, "Packet Native"),
-    CUSTOM_TROJAN_CARRIER(1, "DirectSock");
+    CUSTOM_TROJAN_CARRIER(1, "DirectSock"),
+    PACKET_CHAIN(2, "Packet Chain"),
+    PRIVATE_RELAY(3, "Private Relay");
 
     companion object {
         fun fromRawValue(value: Int): TunnelStackMode {
@@ -50,6 +52,36 @@ enum class TunnelState(val title: String) {
         get() = this == REQUESTING_PERMISSION || this == CONNECTING || this == RUNNING || this == DISCONNECTING
 }
 
+object PacketDefaultProfiles {
+    const val CHAIN_NAME = "Packet Chain"
+    const val CHAIN_SERVER_URL = "http://103.241.67.247:80"
+    const val CHAIN_SECRET = "4f7125a9a35d2e0f0ef74ef5df990856d573b20f0cdbae3bd5e987bf254a3303"
+    const val CHAIN_EDGE = "103.241.67.247:80"
+    const val CHAIN_OBFS_KEY = ""
+    const val CHAIN_TROJAN_URI =
+        "trojan://humanity@172.64.152.23:443?path=%2Fassignment&security=tls" +
+            "&host=www.creationlong.org&type=ws&sni=www.creationlong.org#%40InfoTech_VK"
+
+    fun chainConfiguration(): TunnelConfiguration {
+        return TunnelConfiguration(
+            stackMode = TunnelStackMode.PACKET_CHAIN,
+            serverUrl = CHAIN_SERVER_URL,
+            secret = CHAIN_SECRET,
+            listenPort = "",
+            cdnEdge = CHAIN_EDGE,
+            hostOverride = "",
+            sniOverride = "",
+            transportMode = TunnelTransportMode.WEBSOCKET,
+            obfsKey = CHAIN_OBFS_KEY,
+            upstreamProxy = "",
+            fragmentEnabled = true,
+            fragmentSize = "100",
+            trojanCarrierUri = CHAIN_TROJAN_URI,
+            carrierProxyPort = "10808",
+        )
+    }
+}
+
 data class TunnelConfiguration(
     val stackMode: TunnelStackMode = TunnelStackMode.PACKET_NATIVE,
     val serverUrl: String = "",
@@ -60,6 +92,7 @@ data class TunnelConfiguration(
     val sniOverride: String = "",
     val transportMode: TunnelTransportMode = TunnelTransportMode.AUTO,
     val obfsKey: String = "",
+    val upstreamProxy: String = "",
     val fragmentEnabled: Boolean = true,
     val fragmentSize: String = "40",
     val trojanCarrierUri: String = "",
@@ -74,6 +107,7 @@ data class TunnelConfiguration(
             normalizedHostOverride.isEmpty() &&
             normalizedSniOverride.isEmpty() &&
             normalizedObfsKey.isEmpty() &&
+            normalizedUpstreamProxy.isEmpty() &&
             transportMode == TunnelTransportMode.AUTO
 
     val normalizedServerUrl: String
@@ -94,11 +128,29 @@ data class TunnelConfiguration(
     val normalizedObfsKey: String
         get() = obfsKey.trim()
 
+    val normalizedUpstreamProxy: String
+        get() = upstreamProxy.trim()
+
     val normalizedTrojanCarrierUri: String
         get() = trojanCarrierUri.trim()
 
+    private val parsedServerUri: Uri?
+        get() = runCatching { Uri.parse(normalizedServerUrl) }.getOrNull()
+
+    private val parsedServerHost: String
+        get() = parsedServerUri?.host.orEmpty()
+
+    private val parsedServerPort: Int?
+        get() = parsedServerUri?.port?.takeIf { it > 0 }
+
     val usesCustomCarrier: Boolean
         get() = stackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
+
+    val usesPacketChain: Boolean
+        get() = stackMode == TunnelStackMode.PACKET_CHAIN
+
+    val usesPrivateRelay: Boolean
+        get() = stackMode == TunnelStackMode.PRIVATE_RELAY
 
     val cdnEdgeValidationError: String?
         get() {
@@ -134,13 +186,18 @@ data class TunnelConfiguration(
 
     val usesAdvancedStart: Boolean
         get() = usesCustomCarrier ||
+            usesPacketChain ||
+            usesPrivateRelay ||
             usesCdn ||
             transportMode != TunnelTransportMode.AUTO ||
             normalizedObfsKey.isNotEmpty() ||
+            normalizedUpstreamProxy.isNotEmpty() ||
             fragmentEnabled
 
     val ingressLabel: String
         get() = when {
+            usesPrivateRelay -> "Private Starlink relay"
+            usesPacketChain -> "Trojan + Packet"
             usesCustomCarrier -> "DirectSock"
             transportMode == TunnelTransportMode.OBFS -> "Obfs raw TCP"
             transportMode == TunnelTransportMode.STEALTH -> "Stealth TLS"
@@ -175,6 +232,14 @@ data class TunnelConfiguration(
                 return carrierEndpointHost
             }
 
+            if (usesPacketChain) {
+                return carrierEndpointHost
+            }
+
+            if (usesPrivateRelay) {
+                return parsedServerHost
+            }
+
             val parsedHost = runCatching { Uri.parse(normalizedServerUrl).host }.getOrNull()
             if (!parsedHost.isNullOrBlank()) {
                 return parsedHost
@@ -194,6 +259,14 @@ data class TunnelConfiguration(
                 return carrierEndpointHost
             }
 
+            if (usesPacketChain) {
+                return carrierEndpointHost
+            }
+
+            if (usesPrivateRelay) {
+                return parsedServerHost
+            }
+
             if (cdnEdgeValidationError != null) {
                 return serverHost
             }
@@ -205,6 +278,14 @@ data class TunnelConfiguration(
         get() {
             if (usesCustomCarrier) {
                 return carrierEndpointPort
+            }
+
+            if (usesPacketChain) {
+                return carrierEndpointPort
+            }
+
+            if (usesPrivateRelay) {
+                return parsedServerPort ?: 80
             }
 
             if (cdnEdgeValidationError != null) {
@@ -254,6 +335,14 @@ data class TunnelConfiguration(
                 return "DirectSock"
             }
 
+            if (usesPacketChain) {
+                return PacketDefaultProfiles.CHAIN_NAME
+            }
+
+            if (usesPrivateRelay) {
+                return "Private Relay"
+            }
+
             if (normalizedHostOverride.isNotEmpty()) {
                 return normalizedHostOverride
             }
@@ -281,6 +370,43 @@ data class TunnelConfiguration(
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "DirectSock local port must be 1024-65535."
+                }
+                return null
+            }
+
+            if (usesPacketChain) {
+                if (normalizedTrojanCarrierUri.isEmpty()) {
+                    return "Trojan URI is required for Packet Chain mode."
+                }
+                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
+                    return "Packet Chain Trojan URI must start with trojan://."
+                }
+                if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
+                    return "Packet Chain carrier port must be 1024-65535."
+                }
+                if (normalizedServerUrl.isEmpty()) {
+                    return "Packet Chain server URL is required."
+                }
+                if (normalizedSecret.isEmpty()) {
+                    return "Packet Chain shared secret is required."
+                }
+                cdnEdgeValidationError?.let { return it }
+                return null
+            }
+
+            if (usesPrivateRelay) {
+                if (normalizedServerUrl.isEmpty()) {
+                    return "Private Relay server URL is required."
+                }
+                if (normalizedSecret.isEmpty()) {
+                    return "Private Relay shared secret is required."
+                }
+                val scheme = runCatching { Uri.parse(normalizedServerUrl).scheme?.lowercase() }.getOrNull()
+                if (scheme !in setOf("http", "https")) {
+                    return "Private Relay server URL must start with http:// or https://."
+                }
+                if (parsedServerHost.isBlank()) {
+                    return "Private Relay server URL is missing a host."
                 }
                 return null
             }
@@ -319,6 +445,30 @@ data class TunnelConfiguration(
                 return "Obfs transport requires CDN Edge set to the direct server IP:port, for example 103.241.67.247:36571."
             }
 
+            upstreamProxyValidationError?.let { return it }
+
+            return null
+        }
+
+    val upstreamProxyValidationError: String?
+        get() {
+            val proxy = normalizedUpstreamProxy
+            if (proxy.isEmpty()) return null
+
+            val uri = runCatching { Uri.parse(proxy) }.getOrNull()
+                ?: return "First-hop proxy must be socks5://host:port or http://host:port."
+            val scheme = uri.scheme?.lowercase()
+            if (scheme !in setOf("socks", "socks5", "http", "https")) {
+                return "First-hop proxy must be socks5://host:port or http://host:port."
+            }
+            if (uri.host.isNullOrBlank()) {
+                return "First-hop proxy is missing a host."
+            }
+            val port = uri.port
+            if (port !in 1..65535) {
+                return "First-hop proxy port must be between 1 and 65535."
+            }
+
             return null
         }
 
@@ -333,6 +483,7 @@ data class TunnelConfiguration(
             .put("sni_override", sniOverride)
             .put("transport_mode", transportMode.rawValue)
             .put("obfs_key", obfsKey)
+            .put("upstream_proxy", upstreamProxy)
             .put("fragment_enabled", fragmentEnabled)
             .put("fragment_size", fragmentSize)
             .put("trojan_carrier_uri", trojanCarrierUri)
@@ -355,6 +506,7 @@ data class TunnelConfiguration(
                     json.optInt("transport_mode", TunnelTransportMode.AUTO.rawValue)
                 ),
                 obfsKey = json.optString("obfs_key", ""),
+                upstreamProxy = json.optString("upstream_proxy", ""),
                 fragmentEnabled = json.optBoolean("fragment_enabled", true),
                 fragmentSize = json.optString("fragment_size", "40"),
                 trojanCarrierUri = json.optString("trojan_carrier_uri", ""),
@@ -378,6 +530,10 @@ data class SavedTunnelConfiguration(
     val subtitle: String
         get() = if (configuration.usesCustomCarrier) {
             configuration.normalizedTrojanCarrierUri.ifBlank { "DirectSock not configured" }
+        } else if (configuration.usesPacketChain) {
+            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Trojan missing" }} -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
+        } else if (configuration.usesPrivateRelay) {
+            "${configuration.normalizedServerUrl.ifBlank { "Private VPS missing" }} -> Starlink relay"
         } else {
             configuration.normalizedServerUrl.ifBlank { "Not configured" }
         }

@@ -12,6 +12,8 @@
 
 #[cfg(target_os = "android")]
 pub(crate) mod android_tun;
+pub(crate) mod candidates;
+pub(crate) mod chrome_tls;
 pub(crate) mod decoy;
 pub mod diagnostic;
 pub mod ffi;
@@ -95,6 +97,9 @@ pub struct ClientConfig {
     /// Pre-shared obfuscation "knock" for `TransportMode::Obfs`. Must match
     /// the server's `--obfs-key`. None falls back to the default knock.
     pub obfs_key: Option<String>,
+    /// Optional first-hop proxy used by transports that support chained
+    /// ingress dialing, currently Obfs.
+    pub upstream_proxy: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -118,6 +123,7 @@ impl Default for ClientConfig {
             decoy_traffic: true,
             decoy_workers: 2,
             obfs_key: None,
+            upstream_proxy: None,
         }
     }
 }
@@ -465,6 +471,7 @@ pub async fn start_client_with_listener(
         alpn_override: None,
         user_agent_override: None,
         obfs_key: config.obfs_key.clone(),
+        upstream_proxy: config.upstream_proxy.clone(),
     };
 
     // Spawn the transport loop. If multi_lane_count >= 2 we run the bonded
@@ -472,7 +479,10 @@ pub async fn start_client_with_listener(
     // fingerprint diversity (the stacked-tunnel pattern, replicated
     // in-process). Otherwise we keep the legacy single-tunnel path.
     let transport_state = tunnel_state.clone();
-    if config.multi_lane_count >= 2 {
+    let use_multi_lane =
+        config.multi_lane_count >= 2 && !matches!(config.transport, TransportMode::Obfs);
+
+    if use_multi_lane {
         let lane_cfg = multi_lane::MultiLaneConfig {
             num_lanes: config.multi_lane_count,
             pin_sni: config.multi_lane_pin_sni,
@@ -486,7 +496,11 @@ pub async fn start_client_with_listener(
                 .await;
         });
     } else {
-        info!("[PHANTOM] Launching single-tunnel transport...");
+        if matches!(config.transport, TransportMode::Obfs) && config.multi_lane_count >= 2 {
+            info!("[PHANTOM] Obfs transport selected; using single raw-obfs tunnel");
+        } else {
+            info!("[PHANTOM] Launching single-tunnel transport...");
+        }
         tokio::spawn(async move {
             transport::run_transport(transport_config, upstream_rx, transport_state).await;
         });

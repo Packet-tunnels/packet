@@ -53,7 +53,8 @@ int32_t phantom_start_full(
     int32_t fragment_enabled,
     uint32_t fragment_size,
     int32_t tls_profile,
-    const char *obfs_key
+    const char *obfs_key,
+    const char *upstream_proxy
 );
 
 // Native Packet mesh start

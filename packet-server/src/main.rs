@@ -426,8 +426,7 @@ async fn handle_obfs_conn(
                 Ok(plaintext) => match decode_frames(&plaintext) {
                     Ok(frames) => {
                         for frame in frames {
-                            process_upstream_frame_with_relay(frame, &session_rx, &rx_state)
-                                .await;
+                            process_upstream_frame_with_relay(frame, &session_rx, &rx_state).await;
                         }
                     }
                     Err(e) => error!("[PHANTOM] OBFS frame decode error: {}", e),

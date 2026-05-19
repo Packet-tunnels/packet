@@ -27,7 +27,7 @@ use std::error::Error as _;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio_rustls::rustls::client::danger::{
@@ -96,6 +96,10 @@ pub struct TransportConfig {
     /// the server's `--obfs-key`. Low-entropy is fine — the real crypto is
     /// the inner frame layer.
     pub obfs_key: Option<String>,
+    /// Optional first-hop proxy used to reach the transport ingress. This is
+    /// the Psiphon/Conduit-style layer for networks where the foreign IP is
+    /// reachable only through a local or private bridge.
+    pub upstream_proxy: Option<String>,
 }
 
 impl TransportConfig {
@@ -229,6 +233,94 @@ impl TransportConfig {
 
     fn uses_browser_like_tls(&self) -> bool {
         self.tls_profile == TlsProfile::BrowserLike || matches!(self.mode, TransportMode::Stealth)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TransportUpstreamAuth {
+    username: String,
+    password: String,
+}
+
+impl TransportUpstreamAuth {
+    fn from_url(url: &url::Url) -> Option<Self> {
+        let username = url.username().trim();
+        if username.is_empty() {
+            return None;
+        }
+        Some(Self {
+            username: username.to_string(),
+            password: url.password().unwrap_or("").to_string(),
+        })
+    }
+
+    fn basic_header_value(&self) -> String {
+        use base64::Engine as _;
+
+        let raw = format!("{}:{}", self.username, self.password);
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum TransportUpstreamProxy {
+    Socks5 {
+        host: String,
+        port: u16,
+        auth: Option<TransportUpstreamAuth>,
+    },
+    Http {
+        host: String,
+        port: u16,
+        auth: Option<TransportUpstreamAuth>,
+    },
+}
+
+impl TransportUpstreamProxy {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err("upstream proxy is empty".to_string());
+        }
+
+        let url = url::Url::parse(raw)
+            .map_err(|error| format!("invalid upstream proxy URI: {}", error))?;
+        let host = url
+            .host_str()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "upstream proxy is missing a host".to_string())?
+            .to_string();
+        let port = url
+            .port()
+            .ok_or_else(|| "upstream proxy is missing a port".to_string())?;
+        let auth = TransportUpstreamAuth::from_url(&url);
+
+        match url.scheme().to_ascii_lowercase().as_str() {
+            "socks" | "socks5" => Ok(Self::Socks5 { host, port, auth }),
+            "http" | "https" => Ok(Self::Http { host, port, auth }),
+            other => Err(format!(
+                "upstream proxy must be socks5://host:port or http://host:port, got {}",
+                other
+            )),
+        }
+    }
+
+    fn connect_addr(&self) -> String {
+        match self {
+            Self::Socks5 { host, port, .. } | Self::Http { host, port, .. } => {
+                format!("{}:{}", host, port)
+            }
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Socks5 { .. } => "socks5",
+            Self::Http { .. } => "http",
+        }
     }
 }
 
@@ -380,8 +472,13 @@ pub async fn run_transport(
     tunnel_state: Arc<Mutex<TunnelState>>,
 ) {
     match config.mode {
-        TransportMode::WebSocket => {
-            run_ws_loop(config, upstream_rx, tunnel_state).await;
+        // WebSocket / Obfs / Auto are the Iran escape paths — run them under
+        // the Psiphon-style candidate-rotation supervisor instead of the
+        // single-config retry loop, so we grind a whole pool until one
+        // combination punches through (this is *why* the working stacks take
+        // minutes to connect, not seconds).
+        TransportMode::WebSocket | TransportMode::Obfs | TransportMode::Auto => {
+            run_rotating_transport(config, upstream_rx, tunnel_state).await;
         }
         TransportMode::Http => {
             run_http_loop(config, upstream_rx, tunnel_state).await;
@@ -389,11 +486,82 @@ pub async fn run_transport(
         TransportMode::Stealth => {
             run_stealth_loop(config, upstream_rx, tunnel_state).await;
         }
-        TransportMode::Auto => {
-            run_auto_loop(config, upstream_rx, tunnel_state).await;
-        }
-        TransportMode::Obfs => {
-            run_obfs_loop(config, upstream_rx, tunnel_state).await;
+    }
+}
+
+/// Psiphon-style persistent multi-candidate connector.
+///
+/// Walks the candidate pool forever. For each candidate it makes ONE attempt
+/// (`ws_session`/`obfs_session` connect + run-until-drop). On failure it
+/// advances to the next candidate; on success it keeps that candidate first
+/// next time. It never reports "failed" — only "connecting" with progress —
+/// because the working reference stacks legitimately take up to ~10 minutes
+/// of grinding before a path opens.
+async fn run_rotating_transport(
+    base: TransportConfig,
+    mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: Arc<Mutex<TunnelState>>,
+) {
+    let mut pool = crate::candidates::build_candidates(&base);
+    if pool.is_empty() {
+        warn!("[PHANTOM] candidate pool empty, falling back to base WS loop");
+        run_ws_loop(base, upstream_rx, tunnel_state).await;
+        return;
+    }
+
+    info!(
+        "[PHANTOM] persistent connector: {} candidates, grinding until one opens",
+        pool.len()
+    );
+
+    let mut idx = 0usize;
+    let mut attempt: u64 = 0;
+    loop {
+        let n = pool.len();
+        let cand_idx = idx % n;
+        attempt += 1;
+        set_runtime_state("connecting");
+        info!(
+            "[PHANTOM] connect attempt #{} — candidate {}/{}: {}",
+            attempt,
+            cand_idx + 1,
+            n,
+            pool[cand_idx].label
+        );
+
+        let cfg = pool[cand_idx].config.clone();
+        let result = match cfg.mode {
+            TransportMode::Obfs => obfs_session(&cfg, &mut upstream_rx, &tunnel_state).await,
+            _ => ws_session(&cfg, &mut upstream_rx, &tunnel_state).await,
+        };
+
+        match result {
+            Ok(()) => {
+                // Session ran and ended (clean drop or upstream channel
+                // closed). Keep this candidate first so a reconnect reuses
+                // the known-good path immediately.
+                info!(
+                    "[PHANTOM] candidate '{}' session ended; will retry it first",
+                    pool[cand_idx].label
+                );
+                if cand_idx != 0 {
+                    let good = pool.remove(cand_idx);
+                    pool.insert(0, good);
+                }
+                idx = 0;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                warn!(
+                    "[PHANTOM] candidate '{}' failed: {} — rotating",
+                    pool[cand_idx].label, e
+                );
+                idx = idx.wrapping_add(1);
+                // Short gap between candidates; a longer breather after a
+                // full sweep so we don't hammer a hostile network.
+                let swept = idx % n == 0;
+                tokio::time::sleep(Duration::from_millis(if swept { 4000 } else { 700 })).await;
+            }
         }
     }
 }
@@ -453,10 +621,7 @@ async fn obfs_session(
         .clone()
         .unwrap_or_else(|| "phantom-obfs".to_string());
 
-    let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-        .await
-        .map_err(|_| format!("OBFS TCP connect timeout to {}", addr))?
-        .map_err(|e| format!("OBFS TCP connect to {} failed: {}", addr, e))?;
+    let tcp = connect_transport_tcp(config, &addr, "OBFS").await?;
     let _ = tcp.set_nodelay(true);
 
     let stream = ObfsStream::connect_client(tcp, obfs_key.as_bytes())
@@ -492,8 +657,38 @@ async fn obfs_session(
     set_runtime_connected(Some(ping_ms));
     info!("[PHANTOM] ✓ OBFS TUNNEL ACTIVE — relay is live");
 
+    // ── Dedicated reader task ──────────────────────────────────────
+    // `obfs::read_msg` uses `read_exact`, which is NOT cancellation-safe.
+    // Polling it directly inside `select!` means the send branch firing
+    // would drop a half-read message; because ObfsStream advances the rx
+    // keystream as bytes are consumed, the next read starts from a
+    // misaligned keystream position and decodes a garbage length prefix
+    // ("incoming message length exceeds MAX_MSG_LEN"), tearing the tunnel.
+    //
+    // Owning `rd` in its own task and forwarding whole messages over an
+    // mpsc channel makes the relay loop cancel-safe: channel `recv()` can
+    // be dropped and re-polled with zero data loss.
+    let (down_tx, mut down_rx) = mpsc::channel::<Result<Vec<u8>, String>>(256);
+    let reader = tokio::spawn(async move {
+        loop {
+            match obfs::read_msg(&mut rd).await {
+                Ok(msg) => {
+                    if down_tx.send(Ok(msg)).await.is_err() {
+                        break; // relay loop gone
+                    }
+                }
+                Err(e) => {
+                    let _ = down_tx
+                        .send(Err(format!("OBFS receive error: {}", e)))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
+
     // ── Bidirectional relay (single-loop select!, mirrors ws path) ──
-    loop {
+    let relay_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
         tokio::select! {
             msg = upstream_rx.recv() => {
                 match msg {
@@ -506,18 +701,23 @@ async fn obfs_session(
                         if !frames.is_empty() {
                             let plaintext = encode_frames(&frames);
                             let encrypted = encrypt(&key, &plaintext);
-                            obfs::write_msg(&mut wr, &encrypted).await
-                                .map_err(|e| format!("OBFS send failed: {}", e))?;
+                            if let Err(e) = obfs::write_msg(&mut wr, &encrypted).await {
+                                break Err(format!("OBFS send failed: {}", e).into());
+                            }
                         }
                     }
                     None => {
                         error!("[PHANTOM] OBFS upstream channel closed");
-                        return Ok(());
+                        break Ok(());
                     }
                 }
             }
-            framed = obfs::read_msg(&mut rd) => {
-                let data = framed.map_err(|e| format!("OBFS receive error: {}", e))?;
+            framed = down_rx.recv() => {
+                let data = match framed {
+                    Some(Ok(d)) => d,
+                    Some(Err(e)) => break Err(e.into()),
+                    None => break Err("OBFS reader task ended".into()),
+                };
                 if data.is_empty() {
                     continue; // server keepalive
                 }
@@ -536,6 +736,375 @@ async fn obfs_session(
                 }
             }
         }
+    };
+
+    reader.abort();
+    relay_result
+}
+
+async fn connect_transport_tcp(
+    config: &TransportConfig,
+    addr: &str,
+    context: &'static str,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(raw_proxy) = config
+        .upstream_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(addr))
+            .await
+            .map_err(|_| format!("{} TCP connect timeout to {}", context, addr))?
+            .map_err(|e| format!("{} TCP connect to {} failed: {}", context, addr, e).into());
+    };
+
+    let proxy = TransportUpstreamProxy::parse(raw_proxy)
+        .map_err(|error| format!("{} upstream proxy config error: {}", context, error))?;
+    info!(
+        "[PHANTOM] {} first-hop: dialing {} via {} upstream {}",
+        context,
+        addr,
+        proxy.label(),
+        proxy.connect_addr()
+    );
+
+    match proxy {
+        TransportUpstreamProxy::Socks5 { host, port, auth } => {
+            dial_via_socks5(context, &host, port, auth.as_ref(), addr).await
+        }
+        TransportUpstreamProxy::Http { host, port, auth } => {
+            dial_via_http_proxy(context, &host, port, auth.as_ref(), addr).await
+        }
+    }
+}
+
+async fn connect_transport_upstream(
+    context: &'static str,
+    host: &str,
+    port: u16,
+    proxy_kind: &str,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    let connect_addr = format!("{}:{}", host, port);
+    tokio::time::timeout(Duration::from_secs(20), TcpStream::connect(&connect_addr))
+        .await
+        .map_err(|_| {
+            format!(
+                "{} {} upstream connect timed out: {}",
+                context, proxy_kind, connect_addr
+            )
+        })?
+        .map_err(|error| {
+            format!(
+                "{} {} upstream connect failed: {}: {}",
+                context, proxy_kind, connect_addr, error
+            )
+            .into()
+        })
+}
+
+async fn dial_via_http_proxy(
+    context: &'static str,
+    proxy_host: &str,
+    proxy_port: u16,
+    auth: Option<&TransportUpstreamAuth>,
+    target_addr: &str,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = connect_transport_upstream(context, proxy_host, proxy_port, "HTTP").await?;
+    let _ = stream.set_nodelay(true);
+    let auth_header = auth
+        .map(|auth| format!("Proxy-Authorization: {}\r\n", auth.basic_header_value()))
+        .unwrap_or_default();
+    let request = format!(
+        "CONNECT {target} HTTP/1.1\r\n\
+         Host: {target}\r\n\
+         User-Agent: PacketObfs/1\r\n\
+         {auth_header}\
+         Proxy-Connection: Keep-Alive\r\n\
+         Connection: Keep-Alive\r\n\
+         \r\n",
+        target = target_addr,
+        auth_header = auth_header,
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .map_err(|error| format!("{} HTTP upstream CONNECT write failed: {}", context, error))?;
+
+    let response = read_upstream_http_response_head(context, &mut stream).await?;
+    let status_line = response.lines().next().unwrap_or("").trim();
+    if !status_line.contains(" 200 ") {
+        let carrier_error = extract_http_header(&response, "x-packet-carrier-error")
+            .map(|detail| format!("; carrier={}", detail))
+            .unwrap_or_default();
+        let status = if status_line.is_empty() {
+            "closed before HTTP response"
+        } else {
+            status_line
+        };
+        return Err(format!(
+            "{} HTTP upstream CONNECT failed: {}{}",
+            context, status, carrier_error
+        )
+        .into());
+    }
+
+    Ok(stream)
+}
+
+async fn dial_via_socks5(
+    context: &'static str,
+    proxy_host: &str,
+    proxy_port: u16,
+    auth: Option<&TransportUpstreamAuth>,
+    target_addr: &str,
+) -> Result<TcpStream, Box<dyn std::error::Error + Send + Sync>> {
+    let (target_host, target_port) = split_target_host_port(target_addr)?;
+    let mut stream = connect_transport_upstream(context, proxy_host, proxy_port, "SOCKS5").await?;
+    let _ = stream.set_nodelay(true);
+
+    if auth.is_some() {
+        stream
+            .write_all(&[0x05, 0x02, 0x00, 0x02])
+            .await
+            .map_err(|error| format!("{} SOCKS5 upstream auth write failed: {}", context, error))?;
+    } else {
+        stream
+            .write_all(&[0x05, 0x01, 0x00])
+            .await
+            .map_err(|error| format!("{} SOCKS5 upstream auth write failed: {}", context, error))?;
+    }
+
+    let method_reply = read_exact_upstream(&mut stream, 2, context, "SOCKS5 upstream auth").await?;
+    if method_reply.first().copied() != Some(0x05) {
+        return Err(format!(
+            "{} SOCKS5 upstream sent invalid auth reply: {:02x?}",
+            context, method_reply
+        )
+        .into());
+    }
+
+    match method_reply.get(1).copied() {
+        Some(0x00) => {}
+        Some(0x02) => {
+            let Some(auth) = auth else {
+                return Err(format!(
+                    "{} SOCKS5 upstream requested username/password but none was configured",
+                    context
+                )
+                .into());
+            };
+            authenticate_upstream_socks5(context, &mut stream, auth).await?;
+        }
+        Some(0xff) => {
+            return Err(format!("{} SOCKS5 upstream rejected all auth methods", context).into())
+        }
+        Some(method) => {
+            return Err(format!(
+                "{} SOCKS5 upstream selected unsupported auth method {}",
+                context, method
+            )
+            .into())
+        }
+        None => return Err(format!("{} SOCKS5 upstream auth reply was truncated", context).into()),
+    }
+
+    let host_bytes = target_host.as_bytes();
+    if host_bytes.len() > u8::MAX as usize {
+        return Err(format!("{} SOCKS5 upstream target host is too long", context).into());
+    }
+    let mut request = Vec::with_capacity(7 + host_bytes.len());
+    request.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, host_bytes.len() as u8]);
+    request.extend_from_slice(host_bytes);
+    request.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&request).await.map_err(|error| {
+        format!(
+            "{} SOCKS5 upstream CONNECT write failed: {}",
+            context, error
+        )
+    })?;
+
+    let reply = read_exact_upstream(&mut stream, 4, context, "SOCKS5 upstream CONNECT").await?;
+    if reply[0] != 0x05 || reply[1] != 0x00 {
+        return Err(format!(
+            "{} SOCKS5 upstream CONNECT failed: {}",
+            context,
+            socks5_reply_label(reply.get(1).copied())
+        )
+        .into());
+    }
+    consume_upstream_socks5_bind_address(context, &mut stream, reply[3]).await?;
+    Ok(stream)
+}
+
+async fn authenticate_upstream_socks5(
+    context: &'static str,
+    stream: &mut TcpStream,
+    auth: &TransportUpstreamAuth,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let username = auth.username.as_bytes();
+    let password = auth.password.as_bytes();
+    if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+        return Err(format!("{} SOCKS5 upstream username/password is too long", context).into());
+    }
+
+    let mut request = Vec::with_capacity(3 + username.len() + password.len());
+    request.push(0x01);
+    request.push(username.len() as u8);
+    request.extend_from_slice(username);
+    request.push(password.len() as u8);
+    request.extend_from_slice(password);
+    stream.write_all(&request).await.map_err(|error| {
+        format!(
+            "{} SOCKS5 upstream username/password write failed: {}",
+            context, error
+        )
+    })?;
+
+    let reply =
+        read_exact_upstream(stream, 2, context, "SOCKS5 upstream username/password auth").await?;
+    if reply.as_slice() != [0x01, 0x00] {
+        return Err(format!(
+            "{} SOCKS5 upstream username/password rejected: {:02x?}",
+            context, reply
+        )
+        .into());
+    }
+    Ok(())
+}
+
+async fn read_exact_upstream(
+    stream: &mut TcpStream,
+    len: usize,
+    transport_context: &'static str,
+    operation: &'static str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut buf = vec![0u8; len];
+    tokio::time::timeout(Duration::from_secs(20), stream.read_exact(&mut buf))
+        .await
+        .map_err(|_| format!("{} {} timed out", transport_context, operation))?
+        .map_err(|error| format!("{} {} failed: {}", transport_context, operation, error))?;
+    Ok(buf)
+}
+
+async fn consume_upstream_socks5_bind_address(
+    context: &'static str,
+    stream: &mut TcpStream,
+    address_type: u8,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match address_type {
+        0x01 => {
+            let _ = read_exact_upstream(stream, 6, context, "SOCKS5 upstream bind address").await?;
+        }
+        0x03 => {
+            let len = read_exact_upstream(stream, 1, context, "SOCKS5 upstream bind domain length")
+                .await?[0] as usize;
+            let _ = read_exact_upstream(stream, len + 2, context, "SOCKS5 upstream bind domain")
+                .await?;
+        }
+        0x04 => {
+            let _ = read_exact_upstream(stream, 18, context, "SOCKS5 upstream bind IPv6").await?;
+        }
+        other => {
+            return Err(format!(
+                "{} SOCKS5 upstream unsupported bind type {}",
+                context, other
+            )
+            .into())
+        }
+    }
+    Ok(())
+}
+
+async fn read_upstream_http_response_head(
+    context: &'static str,
+    stream: &mut TcpStream,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut response = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = tokio::time::timeout(Duration::from_secs(20), stream.read(&mut buf))
+            .await
+            .map_err(|_| format!("{} HTTP upstream CONNECT response timed out", context))?
+            .map_err(|error| {
+                format!(
+                    "{} HTTP upstream CONNECT response failed: {}",
+                    context, error
+                )
+            })?;
+        if n == 0 {
+            break;
+        }
+        response.extend_from_slice(&buf[..n]);
+        if response.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+        if response.len() > 8192 {
+            return Err(format!(
+                "{} HTTP upstream CONNECT response headers are too large",
+                context
+            )
+            .into());
+        }
+    }
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
+fn extract_http_header(response: &str, header_name: &str) -> Option<String> {
+    response.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.trim().eq_ignore_ascii_case(header_name) {
+            Some(value.trim().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn split_target_host_port(target_addr: &str) -> Result<(String, u16), String> {
+    if let Some(without_open) = target_addr.strip_prefix('[') {
+        let (host, rest) = without_open.split_once(']').ok_or_else(|| {
+            format!(
+                "target IPv6 address is missing closing bracket: {}",
+                target_addr
+            )
+        })?;
+        let port = rest
+            .strip_prefix(':')
+            .ok_or_else(|| format!("target address is missing port: {}", target_addr))?;
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| format!("target port is invalid: {}", target_addr))?;
+        return Ok((host.to_string(), port));
+    }
+
+    let (host, port) = target_addr
+        .rsplit_once(':')
+        .ok_or_else(|| format!("target address is missing port: {}", target_addr))?;
+    if host.contains(':') {
+        return Err(format!(
+            "target IPv6 address must be bracketed before using upstream proxy: {}",
+            target_addr
+        ));
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| format!("target port is invalid: {}", target_addr))?;
+    Ok((host.to_string(), port))
+}
+
+fn socks5_reply_label(code: Option<u8>) -> &'static str {
+    match code {
+        Some(0x01) => "general failure",
+        Some(0x02) => "connection not allowed",
+        Some(0x03) => "network unreachable",
+        Some(0x04) => "host unreachable",
+        Some(0x05) => "connection refused",
+        Some(0x06) => "TTL expired",
+        Some(0x07) => "command not supported",
+        Some(0x08) => "address type not supported",
+        Some(0x00) => "succeeded",
+        _ => "unknown error",
     }
 }
 
@@ -628,14 +1197,10 @@ async fn ws_session(
         .header("Pragma", "no-cache")
         .body(())?;
 
-    // Establish TCP connection to server (or CDN edge)
+    // Establish TCP connection to server (or CDN edge). Packet Chain uses
+    // `upstream_proxy` here to reach Packet WebSocket through DirectSock.
     info!("[PHANTOM] TCP connecting to {}...", connect_addr);
-    let tcp = TcpStream::connect(&connect_addr).await.map_err(|e| {
-        format!(
-            "TCP connect to {} failed: {} (is the server/CDN reachable?)",
-            connect_addr, e
-        )
-    })?;
+    let tcp = connect_transport_tcp(config, &connect_addr, "WS").await?;
     let _ = tcp.set_nodelay(true);
     info!("[PHANTOM] ✓ TCP connected to {}", connect_addr);
 
@@ -663,40 +1228,80 @@ async fn ws_session(
                 normalize_spki_pins(&config.spki_pins).len()
             );
         }
-        let tls_config = build_tls_client_config(config)?;
+        if config.uses_browser_like_tls() {
+            // ── Chrome-fingerprinted path (BoringSSL) ──────────────────
+            // Iran RSTs the rustls JA3; a real Chrome ClientHello (what
+            // v2ray's fp=chrome sends) is what survives. tcp is already a
+            // FragmentStream so the ClientHello is also TCP-fragmented.
+            info!("[PHANTOM] TLS engine: BoringSSL (Chrome JA3, fp=chrome equivalent)");
+            let alpn: Vec<&[u8]> = vec![b"h2", b"http/1.1"];
+            let tls_stream = tokio::time::timeout(
+                Duration::from_secs(15),
+                crate::chrome_tls::connect_chrome(tcp, &sni, &alpn),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "Chrome TLS handshake timed out (DPI blackhole? SNI: {})",
+                    sni
+                )
+            })?
+            .map_err(|e| format!("{}", e))?;
 
-        // For custom CDNs or tunnels, we might not want to verify the destination IP strictly
-        // For production we'd want custom verifiers, but standard works for Cloudflare
-        let connector = TlsConnector::from(Arc::new(tls_config));
+            info!(
+                "[PHANTOM] WS handshake: upgrade request to {} via Chrome TLS",
+                ws_uri
+            );
+            let (ws_stream, response) = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio_tungstenite::client_async(request, tls_stream),
+            )
+            .await
+            .map_err(|_| "WebSocket TLS handshake timed out (DPI blackhole or CDN drop)")?
+            .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
 
-        let server_name = ServerName::try_from(sni.clone())
-            .map_err(|e| format!("Invalid FQDN for SNI ({}): {}", sni, e))?
-            .to_owned();
+            info!(
+                "[PHANTOM] ✓ WebSocket connected (Chrome TLS) — HTTP {} from {}",
+                response.status(),
+                host
+            );
+            ws_auth_and_relay(ws_stream, config, upstream_rx, tunnel_state, started_at).await
+        } else {
+            let tls_config = build_tls_client_config(config)?;
 
-        let tls_stream =
-            tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, tcp))
-                .await
-                .map_err(|_| format!("TLS handshake timed out (DPI blackhole? SNI: {})", sni))?
-                .map_err(|e| format!("TLS handshake failed (SNI: {}): {}", sni, e))?;
+            // For custom CDNs or tunnels, we might not want to verify the destination IP strictly
+            // For production we'd want custom verifiers, but standard works for Cloudflare
+            let connector = TlsConnector::from(Arc::new(tls_config));
 
-        info!(
-            "[PHANTOM] WS handshake: upgrade request to {} via TLS",
-            ws_uri
-        );
-        let (ws_stream, response) = tokio::time::timeout(
-            Duration::from_secs(15),
-            tokio_tungstenite::client_async(request, tls_stream),
-        )
-        .await
-        .map_err(|_| "WebSocket TLS handshake timed out (DPI blackhole or CDN drop)")?
-        .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+            let server_name = ServerName::try_from(sni.clone())
+                .map_err(|e| format!("Invalid FQDN for SNI ({}): {}", sni, e))?
+                .to_owned();
 
-        info!(
-            "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",
-            response.status(),
-            host
-        );
-        ws_auth_and_relay(ws_stream, config, upstream_rx, tunnel_state, started_at).await
+            let tls_stream =
+                tokio::time::timeout(Duration::from_secs(15), connector.connect(server_name, tcp))
+                    .await
+                    .map_err(|_| format!("TLS handshake timed out (DPI blackhole? SNI: {})", sni))?
+                    .map_err(|e| format!("TLS handshake failed (SNI: {}): {}", sni, e))?;
+
+            info!(
+                "[PHANTOM] WS handshake: upgrade request to {} via TLS",
+                ws_uri
+            );
+            let (ws_stream, response) = tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio_tungstenite::client_async(request, tls_stream),
+            )
+            .await
+            .map_err(|_| "WebSocket TLS handshake timed out (DPI blackhole or CDN drop)")?
+            .map_err(|e| format!("WebSocket handshake failed: {}", e))?;
+
+            info!(
+                "[PHANTOM] ✓ WebSocket connected — HTTP {} from {}",
+                response.status(),
+                host
+            );
+            ws_auth_and_relay(ws_stream, config, upstream_rx, tunnel_state, started_at).await
+        }
     } else {
         // Plaintext WS handshake over the raw TCP stream
         info!(
@@ -1378,7 +1983,9 @@ fn describe_reqwest_error(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_spki_pins;
+    use super::{
+        normalize_spki_pins, split_target_host_port, TransportUpstreamAuth, TransportUpstreamProxy,
+    };
 
     #[test]
     fn normalize_spki_pins_strips_prefixes_and_deduplicates() {
@@ -1392,6 +1999,33 @@ mod tests {
         assert_eq!(
             normalize_spki_pins(&pins),
             vec!["abc123=".to_string(), "def456=".to_string()]
+        );
+    }
+
+    #[test]
+    fn transport_upstream_proxy_parses_socks5() {
+        assert_eq!(
+            TransportUpstreamProxy::parse("socks5://user:pass@127.0.0.1:10808").unwrap(),
+            TransportUpstreamProxy::Socks5 {
+                host: "127.0.0.1".to_string(),
+                port: 10808,
+                auth: Some(TransportUpstreamAuth {
+                    username: "user".to_string(),
+                    password: "pass".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn split_target_host_port_accepts_ipv4_and_bracketed_ipv6() {
+        assert_eq!(
+            split_target_host_port("103.241.67.247:36571").unwrap(),
+            ("103.241.67.247".to_string(), 36571)
+        );
+        assert_eq!(
+            split_target_host_port("[2001:db8::1]:443").unwrap(),
+            ("2001:db8::1".to_string(), 443)
         );
     }
 }

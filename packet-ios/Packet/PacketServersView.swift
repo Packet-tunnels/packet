@@ -239,6 +239,16 @@ private struct ConfigurationEditorSheet: View {
                                     .textInputAutocapitalization(.never)
                                     .autocorrectionDisabled()
                             }
+
+                            HStack {
+                                Text("First-Hop Proxy")
+                                Spacer()
+                                TextField("Optional", text: $draftConfiguration.upstreamProxy)
+                                    .multilineTextAlignment(.trailing)
+                                    .foregroundStyle(.secondary)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
                         }
                     } header: {
                         Text("Network")

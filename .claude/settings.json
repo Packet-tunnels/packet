@@ -29,7 +29,13 @@
       "Bash(find ~/Library -type d -iname \"*meta*\" -o -iname \"*trader*\" 2>/dev/null | grep -i -E \"\\(meta|trader|wine\\)\")",
       "Read(//Users/mohammadshayani/Library/**)",
       "Bash(sudo dscacheutil -flushcache)",
-      "Bash(rm -rf /tmp/*metatrader* /var/tmp/*metatrader*)"
+      "Bash(rm -rf /tmp/*metatrader* /var/tmp/*metatrader*)",
+      "Bash(cargo fetch *)",
+      "Bash(cargo tree *)",
+      "Bash(cmake --version)",
+      "Bash(cat)",
+      "Bash(python3 /tmp/chrome_probe.py)",
+      "Bash(grep -E \"test result|chrome_handshake|panicked|assertion|error\\\\[|FAILED|ok$|passed\")"
     ],
     "additionalDirectories": [
       "/Users/mohammadshayani/Desktop/packet/packet-android/app/src/main/res/drawable"

@@ -90,7 +90,7 @@ class SettingsActivity : Activity() {
 
         emptyStateContainer.visibility = if (configurations.isEmpty()) View.VISIBLE else View.GONE
         protocolSummaryText.text = currentConfiguration.stackMode.title
-        transportSummaryText.text = if (currentConfiguration.usesCustomCarrier) {
+        transportSummaryText.text = if (currentConfiguration.usesCustomCarrier || currentConfiguration.usesPacketChain || currentConfiguration.usesPrivateRelay) {
             currentConfiguration.ingressLabel
         } else {
             currentConfiguration.transportLabel
@@ -201,8 +201,10 @@ class SettingsActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration): String {
         return buildList {
-            val endpoint = if (savedConfiguration.configuration.usesCustomCarrier) {
+            val endpoint = if (savedConfiguration.configuration.usesCustomCarrier || savedConfiguration.configuration.usesPacketChain) {
                 savedConfiguration.configuration.normalizedTrojanCarrierUri
+            } else if (savedConfiguration.configuration.usesPrivateRelay) {
+                savedConfiguration.configuration.normalizedServerUrl
             } else {
                 savedConfiguration.configuration.normalizedServerUrl
             }
@@ -244,6 +246,7 @@ class SettingsActivity : Activity() {
         val hostOverrideInput = dialog.findViewById<EditText>(R.id.settingsHostOverrideInput)
         val sniOverrideInput = dialog.findViewById<EditText>(R.id.settingsSniOverrideInput)
         val obfsKeyInput = dialog.findViewById<EditText>(R.id.settingsObfsKeyInput)
+        val upstreamProxyInput = dialog.findViewById<EditText>(R.id.settingsUpstreamProxyInput)
         val fragmentToggleRow = dialog.findViewById<View>(R.id.settingsFragmentToggleRow)
         val fragmentCheckBox = dialog.findViewById<CheckBox>(R.id.settingsFragmentCheckBox)
         val fragmentSizeInput = dialog.findViewById<EditText>(R.id.settingsFragmentSizeInput)
@@ -263,6 +266,7 @@ class SettingsActivity : Activity() {
         hostOverrideInput.setText(seedConfiguration.hostOverride)
         sniOverrideInput.setText(seedConfiguration.sniOverride)
         obfsKeyInput.setText(seedConfiguration.obfsKey)
+        upstreamProxyInput.setText(seedConfiguration.upstreamProxy)
         fragmentCheckBox.isChecked = seedConfiguration.fragmentEnabled
         fragmentSizeInput.setText(seedConfiguration.fragmentSize)
         trojanCarrierUriInput.setText(seedConfiguration.trojanCarrierUri)
@@ -297,7 +301,9 @@ class SettingsActivity : Activity() {
         }
 
         fun updateStackVisibility() {
-            layeredContainer.visibility = if (selectedStackMode() == TunnelStackMode.CUSTOM_TROJAN_CARRIER) {
+            layeredContainer.visibility = if (selectedStackMode() == TunnelStackMode.CUSTOM_TROJAN_CARRIER ||
+                selectedStackMode() == TunnelStackMode.PACKET_CHAIN
+            ) {
                 View.VISIBLE
             } else {
                 View.GONE
@@ -358,6 +364,7 @@ class SettingsActivity : Activity() {
                     TunnelTransportMode.AUTO
                 },
                 obfsKey = obfsKeyInput.text.toString(),
+                upstreamProxy = upstreamProxyInput.text.toString(),
                 fragmentEnabled = fragmentCheckBox.isChecked,
                 fragmentSize = fragmentSizeInput.text.toString(),
                 trojanCarrierUri = trojanCarrierUriInput.text.toString(),

@@ -28,6 +28,20 @@ if [[ ! -d "$NDK_ROOT" ]]; then
   exit 1
 fi
 
+# BoringSSL (the Chrome-JA3 TLS engine, via the `boring` crate) is compiled
+# from source by boring-sys. That needs cmake + go + a C/C++ toolchain. The
+# NDK provides the toolchain (set as CC/CXX below); cmake and go must be on
+# PATH. Fail early with an actionable message instead of a deep cargo error.
+missing_tools=()
+command -v cmake >/dev/null 2>&1 || missing_tools+=("cmake")
+command -v go    >/dev/null 2>&1 || missing_tools+=("go")
+if ((${#missing_tools[@]} > 0)); then
+  echo "Missing build tools required by BoringSSL: ${missing_tools[*]}" >&2
+  echo "Install them with:" >&2
+  echo "  brew install ${missing_tools[*]}" >&2
+  exit 1
+fi
+
 if ((${#missing_targets[@]} > 0)); then
   echo "Missing Rust Android targets: ${missing_targets[*]}" >&2
   echo "Install them with:" >&2
@@ -63,7 +77,13 @@ for entry in "${TARGETS[@]}"; do
 
   echo "==> Building phantom-client for $target"
 
+  # ANDROID_NDK_ROOT / ANDROID_NDK_HOME let boring-sys point its cmake
+  # BoringSSL build at the NDK toolchain for cross-compilation. Without
+  # these, boring-sys builds BoringSSL for the host arch and the final
+  # link fails with "Undefined symbols for architecture arm64".
   env \
+    "ANDROID_NDK_ROOT=$NDK_ROOT" \
+    "ANDROID_NDK_HOME=$NDK_ROOT" \
     "CARGO_TARGET_${cargo_env_target}_LINKER=$clang" \
     "CC_${cc_env_target}=$clang" \
     "CXX_${cc_env_target}=$clangxx" \

@@ -75,7 +75,11 @@ object PhantomTunnel {
         fragmentEnabled: Boolean,
         fragmentSize: Int,
         obfsKey: String,
+        upstreamProxy: String,
     ): Int
+
+    @JvmStatic
+    external fun startClientPrivateRelay(serverUrl: String, secret: String, listenPort: Int): Int
 
     @JvmStatic
     external fun startTun2Socks(

@@ -74,6 +74,7 @@ struct TrojanTarget {
     sni: String,
     /// WebSocket path (e.g. /assignment).
     ws_path: String,
+    tls_fingerprint: Option<String>,
     upstream_proxy: Option<DiagnosticEndpoint>,
 }
 
@@ -108,6 +109,7 @@ fn parse_trojan(uri: &str) -> Result<TrojanTarget, String> {
         ws_host: host.to_string(),
         sni: host.to_string(),
         ws_path: "/".to_string(),
+        tls_fingerprint: None,
         upstream_proxy: None,
     };
 
@@ -121,6 +123,12 @@ fn parse_trojan(uri: &str) -> Result<TrojanTarget, String> {
             "host" => t.ws_host = v,
             "sni" => t.sni = v,
             "path" => t.ws_path = v,
+            "fp" | "fingerprint" => {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    t.tls_fingerprint = Some(trimmed.to_ascii_lowercase());
+                }
+            }
             "upstream" | "upstream_proxy" | "proxy" => {
                 t.upstream_proxy = parse_proxy_endpoint(&v, "socks5", "configured upstream")
             }
@@ -546,6 +554,76 @@ async fn probe_ws_upgrade_fragmented(t: &TrojanTarget, fragment_hint: usize) -> 
     }
 }
 
+/// Same WS upgrade as DirectSock's `fp=chrome` carrier path: TCP-fragmented
+/// ClientHello emitted by BoringSSL/Chrome instead of rustls.
+async fn probe_ws_upgrade_chrome_fragmented(
+    t: &TrojanTarget,
+    fragment_hint: usize,
+) -> (Outcome, u128) {
+    let start = Instant::now();
+    let target_addr = format!("{}:{}", t.host_ip, t.port);
+    let sa = match resolve_socket_addr(&target_addr).await {
+        Ok(sa) => sa,
+        Err(outcome) => return (outcome, start.elapsed().as_millis()),
+    };
+    let tcp = match timeout(STEP_TIMEOUT, TcpStream::connect(sa)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return (classify_io(&e), start.elapsed().as_millis()),
+        Err(_) => return (Outcome::Timeout, start.elapsed().as_millis()),
+    };
+    let _ = tcp.set_nodelay(true);
+    let tcp = FragmentStream::new(tcp, fragment_hint);
+    let alpn: Vec<&[u8]> = vec![b"http/1.1"];
+    let mut tls = match timeout(
+        STEP_TIMEOUT,
+        crate::chrome_tls::connect_chrome(tcp, &t.sni, &alpn),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            let es = e.to_lowercase();
+            let out = if es.contains("reset") || es.contains("eof") || es.contains("closed") {
+                Outcome::TlsResetMidHandshake
+            } else {
+                Outcome::TlsOtherError(e)
+            };
+            return (out, start.elapsed().as_millis());
+        }
+        Err(_) => return (Outcome::Timeout, start.elapsed().as_millis()),
+    };
+
+    let key = "dGhlIHNhbXBsZSBub25jZQ==";
+    let req = format!(
+        "GET {path} HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: {key}\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         User-Agent: Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36\r\n\
+         Accept-Language: fa,en-US;q=0.9,en;q=0.8\r\n\
+         \r\n",
+        path = t.ws_path,
+        host = t.ws_host,
+        key = key,
+    );
+    if let Err(e) = tls.write_all(req.as_bytes()).await {
+        return (classify_io(&e), start.elapsed().as_millis());
+    }
+    let mut buf = [0u8; 1024];
+    match timeout(STEP_TIMEOUT, tls.read(&mut buf)).await {
+        Ok(Ok(0)) => (Outcome::TlsResetMidHandshake, start.elapsed().as_millis()),
+        Ok(Ok(n)) => {
+            let line = String::from_utf8_lossy(&buf[..n]);
+            let first = line.lines().next().unwrap_or("").to_string();
+            (Outcome::HttpStatus(first), start.elapsed().as_millis())
+        }
+        Ok(Err(e)) => (classify_io(&e), start.elapsed().as_millis()),
+        Err(_) => (Outcome::Timeout, start.elapsed().as_millis()),
+    }
+}
+
 /// Fetch the device's public egress IP via a few independent echoes. This is
 /// the decisive tunnel-vs-direct signal.
 async fn probe_egress() -> Vec<(String, String)> {
@@ -871,8 +949,13 @@ pub async fn run_diagnostic(trojan_uri: &str) -> String {
         }
     };
     r.push_str(&format!(
-        "[3] TARGET\n  ip={}  port={}  sni={}  host={}  path={}\n\n",
-        t.host_ip, t.port, t.sni, t.ws_host, t.ws_path
+        "[3] TARGET\n  ip={}  port={}  sni={}  host={}  path={}  fp={}\n\n",
+        t.host_ip,
+        t.port,
+        t.sni,
+        t.ws_host,
+        t.ws_path,
+        t.tls_fingerprint.as_deref().unwrap_or("default")
     ));
 
     let ip_port = format!("{}:{}", t.host_ip, t.port);
@@ -896,11 +979,14 @@ pub async fn run_diagnostic(trojan_uri: &str) -> String {
 
     let (o, ms) = probe_ws_upgrade_fragmented(&t, 100).await;
     line(&mut r, "WS upgrade + tlshello fragment", &o, ms);
+    let (o, ms) = probe_ws_upgrade_chrome_fragmented(&t, 100).await;
+    line(&mut r, "WS upgrade + Chrome fragment", &o, ms);
     r.push_str(
         "  Interpretation: TCP-OK + TLS-config-SNI=RST-AFTER-CLIENTHELLO\n\
         \x20 but TLS-NO-SNI=OK  → SNI-based block on this domain.\n\
         \x20 TCP=TIMEOUT → IP-level blackhole. If fragmented WS is OK while\n\
-        \x20 normal WS fails, tlshello fragmentation is enough. If both fail\n\
+        \x20 normal WS fails, tlshello fragmentation is enough. If only the\n\
+        \x20 Chrome-fragment probe works, fp=chrome is required. If both fail\n\
         \x20 direct but local proxy egress works, a Psiphon-like first hop is\n\
         \x20 the missing layer.\n\n",
     );

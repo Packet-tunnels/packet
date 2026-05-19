@@ -31,5 +31,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 webpki-roots = "0.26"
 rustls-pki-types = "1"
 rustls-webpki = { version = "0.103.12", default-features = false, features = ["ring", "std"] }
+# BoringSSL — Chrome's own TLS library. Used by the WS carrier to emit a
+# Chrome-identical ClientHello (JA3) so Iran's DPI can't fingerprint-block
+# the handshake the way it does the rustls one.
+boring = "4"
+tokio-boring = "4"
 libc = "0.2"
 tun2socks = "0.1.10"

@@ -64,6 +64,7 @@ object TunnelPreferences {
     private const val KEY_SNI_OVERRIDE = "sni_override"
     private const val KEY_TRANSPORT_MODE = "transport_mode"
     private const val KEY_OBFS_KEY = "obfs_key"
+    private const val KEY_UPSTREAM_PROXY = "upstream_proxy"
     private const val KEY_FRAGMENT_ENABLED = "fragment_enabled"
     private const val KEY_FRAGMENT_SIZE = "fragment_size"
     private const val KEY_STATE = "state"
@@ -79,18 +80,55 @@ object TunnelPreferences {
         val preferences = prefs(context)
         val savedConfigurations = loadSavedConfigurationsInternal(preferences)
         if (savedConfigurations.isNotEmpty()) {
+            val chainProfile = savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.CHAIN_NAME }?.let { existing ->
+                val refreshed = existing.copy(configuration = PacketDefaultProfiles.chainConfiguration())
+                val index = savedConfigurations.indexOfFirst { it.id == existing.id }
+                if (index >= 0 && savedConfigurations[index].configuration != refreshed.configuration) {
+                    savedConfigurations[index] = refreshed
+                    persistSavedConfigurations(preferences.edit(), savedConfigurations)
+                        .let { editor ->
+                            if (preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null) == refreshed.id) {
+                                mirrorLegacyConfiguration(editor, refreshed.configuration)
+                            } else {
+                                editor
+                            }
+                        }
+                        .apply()
+                }
+                refreshed
+            } ?: run {
+                val inserted = SavedTunnelConfiguration(
+                    name = PacketDefaultProfiles.CHAIN_NAME,
+                    configuration = PacketDefaultProfiles.chainConfiguration(),
+                )
+                savedConfigurations.add(0, inserted)
+                persistSavedConfigurations(preferences.edit(), savedConfigurations)
+                    .putString(KEY_SELECTED_CONFIGURATION_ID, inserted.id)
+                    .let { mirrorLegacyConfiguration(it, inserted.configuration) }
+                    .apply()
+                inserted
+            }
+
             val selectedId = preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null)
             if (selectedId == null || savedConfigurations.none { it.id == selectedId }) {
                 preferences.edit()
-                    .putString(KEY_SELECTED_CONFIGURATION_ID, savedConfigurations.first().id)
+                    .putString(KEY_SELECTED_CONFIGURATION_ID, chainProfile.id)
                     .apply()
-                mirrorLegacyConfiguration(preferences.edit(), savedConfigurations.first().configuration).apply()
+                mirrorLegacyConfiguration(preferences.edit(), chainProfile.configuration).apply()
             }
             return
         }
 
         val legacyConfiguration = loadLegacyConfiguration(preferences)
         if (legacyConfiguration.isEmpty) {
+            val defaultConfiguration = SavedTunnelConfiguration(
+                name = PacketDefaultProfiles.CHAIN_NAME,
+                configuration = PacketDefaultProfiles.chainConfiguration(),
+            )
+            preferences.edit()
+                .putString(KEY_SAVED_CONFIGURATIONS, JSONArray().put(defaultConfiguration.toJsonObject()).toString())
+                .putString(KEY_SELECTED_CONFIGURATION_ID, defaultConfiguration.id)
+                .apply()
             return
         }
 
@@ -117,6 +155,7 @@ object TunnelPreferences {
                 preferences.getInt(KEY_TRANSPORT_MODE, defaults.transportMode.rawValue)
             ),
             obfsKey = preferences.getString(KEY_OBFS_KEY, defaults.obfsKey) ?: defaults.obfsKey,
+            upstreamProxy = preferences.getString(KEY_UPSTREAM_PROXY, defaults.upstreamProxy) ?: defaults.upstreamProxy,
             fragmentEnabled = preferences.getBoolean(KEY_FRAGMENT_ENABLED, defaults.fragmentEnabled),
             fragmentSize = preferences.getString(KEY_FRAGMENT_SIZE, defaults.fragmentSize) ?: defaults.fragmentSize,
         )
@@ -157,6 +196,7 @@ object TunnelPreferences {
             .putString(KEY_SNI_OVERRIDE, configuration.sniOverride)
             .putInt(KEY_TRANSPORT_MODE, configuration.transportMode.rawValue)
             .putString(KEY_OBFS_KEY, configuration.obfsKey)
+            .putString(KEY_UPSTREAM_PROXY, configuration.upstreamProxy)
             .putBoolean(KEY_FRAGMENT_ENABLED, configuration.fragmentEnabled)
             .putString(KEY_FRAGMENT_SIZE, configuration.fragmentSize)
     }

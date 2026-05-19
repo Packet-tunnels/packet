@@ -101,6 +101,11 @@ struct Cli {
     /// IP:port via --cdn-edge (NOT a TLS-terminating CDN).
     #[arg(long, env = "PHANTOM_OBFS_KEY")]
     obfs_key: Option<String>,
+
+    /// Optional first-hop proxy for Obfs, for example
+    /// socks5://127.0.0.1:10808 or http://user:pass@bridge:8080.
+    #[arg(long, env = "PHANTOM_UPSTREAM_PROXY")]
+    upstream_proxy: Option<String>,
 }
 
 fn parse_transport(s: &str) -> phantom_client::TransportMode {
@@ -158,6 +163,7 @@ async fn main() {
         decoy_traffic: !cli.no_decoy,
         decoy_workers: cli.decoy_workers,
         obfs_key: cli.obfs_key,
+        upstream_proxy: cli.upstream_proxy,
         ..Default::default()
     };
 

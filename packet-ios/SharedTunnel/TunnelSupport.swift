@@ -27,6 +27,7 @@ enum TunnelProviderKeys {
     static let sniOverride = "sniOverride"
     static let transportMode = "transportMode"
     static let obfsKey = "obfsKey"
+    static let upstreamProxy = "upstreamProxy"
     static let fragmentEnabled = "fragmentEnabled"
     static let fragmentSize = "fragmentSize"
     static let trojanCarrierURI = "trojanCarrierURI"
@@ -84,6 +85,7 @@ struct TunnelConfiguration: Codable, Equatable {
     var sniOverride = ""
     var transportMode: TunnelTransportMode = .auto
     var obfsKey = ""
+    var upstreamProxy = ""
     var fragmentEnabled = true
     var fragmentSize = "40"
     var trojanCarrierURI = ""
@@ -99,6 +101,7 @@ struct TunnelConfiguration: Codable, Equatable {
         case sniOverride
         case transportMode
         case obfsKey
+        case upstreamProxy
         case fragmentEnabled
         case fragmentSize
         case trojanCarrierURI
@@ -118,6 +121,7 @@ struct TunnelConfiguration: Codable, Equatable {
         sniOverride = try container.decodeIfPresent(String.self, forKey: .sniOverride) ?? ""
         transportMode = try container.decodeIfPresent(TunnelTransportMode.self, forKey: .transportMode) ?? .auto
         obfsKey = try container.decodeIfPresent(String.self, forKey: .obfsKey) ?? ""
+        upstreamProxy = try container.decodeIfPresent(String.self, forKey: .upstreamProxy) ?? ""
         fragmentEnabled = try container.decodeIfPresent(Bool.self, forKey: .fragmentEnabled) ?? true
         fragmentSize = try container.decodeIfPresent(String.self, forKey: .fragmentSize) ?? "40"
         trojanCarrierURI = try container.decodeIfPresent(String.self, forKey: .trojanCarrierURI) ?? ""
@@ -139,6 +143,7 @@ struct TunnelConfiguration: Codable, Equatable {
         hostOverride = providerConfiguration[TunnelProviderKeys.hostOverride] as? String ?? hostOverride
         sniOverride = providerConfiguration[TunnelProviderKeys.sniOverride] as? String ?? sniOverride
         obfsKey = providerConfiguration[TunnelProviderKeys.obfsKey] as? String ?? obfsKey
+        upstreamProxy = providerConfiguration[TunnelProviderKeys.upstreamProxy] as? String ?? upstreamProxy
         trojanCarrierURI = providerConfiguration[TunnelProviderKeys.trojanCarrierURI] as? String ?? trojanCarrierURI
         carrierProxyPort = providerConfiguration[TunnelProviderKeys.carrierProxyPort] as? String ?? carrierProxyPort
 
@@ -187,6 +192,7 @@ struct TunnelConfiguration: Codable, Equatable {
             && normalizedHostOverride.isEmpty
             && normalizedSNIOverride.isEmpty
             && normalizedObfsKey.isEmpty
+            && normalizedUpstreamProxy.isEmpty
             && transportMode == .auto
     }
 
@@ -212,6 +218,10 @@ struct TunnelConfiguration: Codable, Equatable {
 
     var normalizedObfsKey: String {
         Self.trimmed(obfsKey)
+    }
+
+    var normalizedUpstreamProxy: String {
+        Self.trimmed(upstreamProxy)
     }
 
     var normalizedTrojanCarrierURI: String {
@@ -247,6 +257,30 @@ struct TunnelConfiguration: Codable, Equatable {
         return nil
     }
 
+    var upstreamProxyValidationError: String? {
+        let proxy = normalizedUpstreamProxy
+        if proxy.isEmpty {
+            return nil
+        }
+
+        guard let url = URL(string: proxy),
+            let scheme = url.scheme?.lowercased(),
+            ["socks", "socks5", "http", "https"].contains(scheme)
+        else {
+            return "First-hop proxy must be socks5://host:port or http://host:port."
+        }
+
+        guard let host = url.host, !host.isEmpty else {
+            return "First-hop proxy is missing a host."
+        }
+
+        guard let port = url.port, (1...65535).contains(port) else {
+            return "First-hop proxy port must be between 1 and 65535."
+        }
+
+        return nil
+    }
+
     var advancedValidationError: String? {
         if usesCustomCarrier {
             return layeredValidationError
@@ -270,6 +304,10 @@ struct TunnelConfiguration: Codable, Equatable {
 
         if transportMode == .obfs && normalizedCDNEdge.isEmpty {
             return "Obfs transport requires CDN Edge set to the direct server IP:port, for example 103.241.67.247:36571."
+        }
+
+        if let upstreamProxyValidationError {
+            return upstreamProxyValidationError
         }
 
         if fragmentEnabled {
@@ -323,6 +361,7 @@ struct TunnelConfiguration: Codable, Equatable {
             usesCDN ||
             !normalizedSNIOverride.isEmpty ||
             !normalizedObfsKey.isEmpty ||
+            !normalizedUpstreamProxy.isEmpty ||
             transportMode != .auto ||
             fragmentEnabled
     }
@@ -495,6 +534,7 @@ struct TunnelConfiguration: Codable, Equatable {
             TunnelProviderKeys.sniOverride: normalizedSNIOverride,
             TunnelProviderKeys.transportMode: Int(transportMode.rawValue),
             TunnelProviderKeys.obfsKey: normalizedObfsKey,
+            TunnelProviderKeys.upstreamProxy: normalizedUpstreamProxy,
             TunnelProviderKeys.fragmentEnabled: fragmentEnabled,
             TunnelProviderKeys.fragmentSize: Int(fragmentSizeValue),
             TunnelProviderKeys.trojanCarrierURI: normalizedTrojanCarrierURI,
@@ -780,19 +820,22 @@ enum TunnelRuntimeBridge {
                         withOptionalCString(configuration.normalizedHostOverride) { hostOverridePointer in
                             withOptionalCString(configuration.normalizedSNIOverride) { sniOverridePointer in
                                 withOptionalCString(configuration.normalizedObfsKey) { obfsKeyPointer in
-                                    phantom_start_full(
-                                        serverURLPointer,
-                                        secretPointer,
-                                        listenPort,
-                                        cdnEdgePointer,
-                                        hostOverridePointer,
-                                        sniOverridePointer,
-                                        configuration.transportMode.rawValue,
-                                        configuration.fragmentEnabled ? 1 : 0,
-                                        configuration.fragmentSizeValue,
-                                        configuration.transportMode == .stealth ? 1 : 0,
-                                        obfsKeyPointer
-                                    )
+                                    withOptionalCString(configuration.normalizedUpstreamProxy) { upstreamProxyPointer in
+                                        phantom_start_full(
+                                            serverURLPointer,
+                                            secretPointer,
+                                            listenPort,
+                                            cdnEdgePointer,
+                                            hostOverridePointer,
+                                            sniOverridePointer,
+                                            configuration.transportMode.rawValue,
+                                            configuration.fragmentEnabled ? 1 : 0,
+                                            configuration.fragmentSizeValue,
+                                            configuration.transportMode == .stealth ? 1 : 0,
+                                            obfsKeyPointer,
+                                            upstreamProxyPointer
+                                        )
+                                    }
                                 }
                             }
                         }

@@ -59,6 +59,8 @@ struct MeshStartRequest {
     tls_profile: Option<String>,
     #[serde(default)]
     obfs_key: Option<String>,
+    #[serde(default)]
+    upstream_proxy: Option<String>,
 }
 
 lazy_static::lazy_static! {
@@ -586,6 +588,7 @@ pub extern "C" fn phantom_start_full(
     fragment_size: u32,
     tls_profile: i32,
     obfs_key: *const c_char,
+    upstream_proxy: *const c_char,
 ) -> i32 {
     let url = unsafe {
         if server_url.is_null() {
@@ -636,6 +639,20 @@ pub extern "C" fn phantom_start_full(
             }
         }
     };
+    let upstream_proxy = unsafe {
+        if upstream_proxy.is_null() {
+            None
+        } else {
+            let value = CStr::from_ptr(upstream_proxy)
+                .to_string_lossy()
+                .into_owned();
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+    };
 
     let transport = parse_transport_mode_value(transport_mode);
     let requested_tls_profile = parse_tls_profile_value(tls_profile);
@@ -664,6 +681,7 @@ pub extern "C" fn phantom_start_full(
         mesh_bootstrap: None,
         tls_profile: requested_tls_profile.unwrap_or_else(|| tls_profile_for_transport(&transport)),
         obfs_key,
+        upstream_proxy,
         ..Default::default()
     };
 
@@ -1002,6 +1020,7 @@ pub mod android {
         fragment_enabled: jboolean,
         fragment_size: jint,
         obfs_key: JString,
+        upstream_proxy: JString,
     ) -> jint {
         env.with_env(|env| -> JniResult<jint> {
             let url = server_url.try_to_string(env)?;
@@ -1010,6 +1029,7 @@ pub mod android {
             let host_str = host_override.try_to_string(env).unwrap_or_default();
             let sni_str = sni_override.try_to_string(env).unwrap_or_default();
             let obfs_key_str = obfs_key.try_to_string(env).unwrap_or_default();
+            let upstream_proxy_str = upstream_proxy.try_to_string(env).unwrap_or_default();
 
             let edge = if edge_str.is_empty() {
                 None
@@ -1030,6 +1050,11 @@ pub mod android {
                 None
             } else {
                 Some(obfs_key_str)
+            };
+            let upstream_proxy = if upstream_proxy_str.trim().is_empty() {
+                None
+            } else {
+                Some(upstream_proxy_str)
             };
 
             let transport = parse_transport_mode_value(transport_mode);
@@ -1058,10 +1083,69 @@ pub mod android {
                 mesh_bootstrap: None,
                 tls_profile: tls_profile_for_transport(&transport),
                 obfs_key,
+                upstream_proxy,
                 ..Default::default()
             };
 
             tracing::info!("[PHANTOM] startClientFull: SNI={:?}", config.sni_override);
+
+            Ok(spawn_client_with_bound_listener(config, listener) as jint)
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    /// Private relay mode: direct WebSocket to the private Iran VPS front
+    /// door, with the server routing traffic through an authenticated
+    /// Starlink relay node. This disables public-bypass extras that add risk
+    /// or overhead for a private few-user deployment.
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startClientPrivateRelay(
+        mut env: EnvUnowned,
+        _class: JClass,
+        server_url: JString,
+        secret: JString,
+        listen_port: jint,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let url = server_url.try_to_string(env)?;
+            let sec = secret.try_to_string(env)?;
+
+            init_logging();
+            let (listener, listen_addr, _actual_port) =
+                match bind_requested_or_auto_listener(listen_port as u16) {
+                    Ok(bound) => bound,
+                    Err(e) => {
+                        tracing::error!("[PHANTOM] ❌ {}", e);
+                        return Ok(-2);
+                    }
+                };
+
+            let config = ClientConfig {
+                server_url: url,
+                secret: sec,
+                listen: listen_addr,
+                transport: crate::TransportMode::WebSocket,
+                cdn_edge: None,
+                host_override: None,
+                sni_override: None,
+                fragment: false,
+                fragment_size: 0,
+                padding: false,
+                auth_ticket: None,
+                mesh_bootstrap: None,
+                tls_profile: crate::TlsProfile::Default,
+                multi_lane_count: 1,
+                multi_lane_pin_sni: true,
+                decoy_traffic: false,
+                decoy_workers: 0,
+                obfs_key: None,
+                upstream_proxy: None,
+                ..Default::default()
+            };
+
+            tracing::info!(
+                "[PHANTOM] startClientPrivateRelay: single WS lane, padding=off, decoy=off"
+            );
 
             Ok(spawn_client_with_bound_listener(config, listener) as jint)
         })
@@ -1155,6 +1239,9 @@ fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32,
         mesh_bootstrap: request.bootstrap,
         tls_profile,
         obfs_key: request.obfs_key.filter(|value| !value.trim().is_empty()),
+        upstream_proxy: request
+            .upstream_proxy
+            .filter(|value| !value.trim().is_empty()),
         ..Default::default()
     };
 

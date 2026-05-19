@@ -40,8 +40,7 @@ import kotlin.concurrent.thread
 class DiagnosticActivity : Activity() {
 
     private val defaultUri =
-        "trojan://humanity@172.64.152.23:443?path=%2Fassignment&security=tls" +
-            "&host=www.creationlong.org&type=ws&sni=www.creationlong.org#%40InfoTech_VK"
+        PacketDefaultProfiles.CHAIN_TROJAN_URI
 
     private lateinit var uriInput: EditText
     private lateinit var output: TextView
@@ -76,8 +75,8 @@ class DiagnosticActivity : Activity() {
         root.addView(headerRow)
 
         root.addView(TextView(this).apply {
-            text = "Run with Psiphon ON, Psiphon OFF, and Packet ON. " +
-                "For Packet, compare LOCAL PROXY EGRESS; raw app egress is excluded from our VPN."
+            text = "Built-in Packet Chain uses the known Trojan/Cloudflare carrier, Chrome TLS, TLSHello fragmentation, and Packet WebSocket escape. " +
+                "Tap Connect on the main screen, then run this report while Packet is still trying or connected."
             textSize = 12f
             setPadding(0, 0, 0, pad / 4)
         })

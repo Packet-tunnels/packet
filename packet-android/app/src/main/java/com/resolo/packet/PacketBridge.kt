@@ -94,6 +94,7 @@ class PacketBridge {
             fragmentEnabled: Boolean,
             fragmentSize: Int,
             obfsKey: String,
+            upstreamProxy: String,
         ): Int =
             PhantomTunnel.startClientFull(
                 serverUrl,
@@ -106,7 +107,12 @@ class PacketBridge {
                 fragmentEnabled,
                 fragmentSize,
                 obfsKey,
+                upstreamProxy,
             )
+
+        @JvmStatic
+        fun startClientPrivateRelay(serverUrl: String, secret: String, listenPort: Int): Int =
+            PhantomTunnel.startClientPrivateRelay(serverUrl, secret, listenPort)
 
         @JvmStatic
         fun startTun2Socks(

@@ -133,6 +133,7 @@ class MainActivity : Activity() {
     private lateinit var editorHostOverrideInput: EditText
     private lateinit var editorSniOverrideInput: EditText
     private lateinit var editorObfsKeyInput: EditText
+    private lateinit var editorUpstreamProxyInput: EditText
     private lateinit var editorTrojanUriInput: EditText
     private lateinit var editorCarrierPortInput: EditText
     private lateinit var editorFragmentSwitch: Switch
@@ -283,6 +284,7 @@ class MainActivity : Activity() {
         editorHostOverrideInput = findViewById(R.id.editorHostOverrideInput)
         editorSniOverrideInput = findViewById(R.id.editorSniOverrideInput)
         editorObfsKeyInput = findViewById(R.id.editorObfsKeyInput)
+        editorUpstreamProxyInput = findViewById(R.id.editorUpstreamProxyInput)
         editorTrojanUriInput = findViewById(R.id.editorTrojanUriInput)
         editorCarrierPortInput = findViewById(R.id.editorCarrierPortInput)
         editorFragmentSwitch = findViewById(R.id.editorFragmentSwitch)
@@ -1017,8 +1019,8 @@ class MainActivity : Activity() {
         val current = currentConfiguration
         settingsProfilesSummaryText.text = TunnelPreferences.loadSavedConfigurations(this).size.toString()
         settingsProtocolSummaryText.text = displayStackMode(current.stackMode)
-        settingsTransportSummaryText.text = if (current.usesCustomCarrier) {
-            displayStackMode(TunnelStackMode.CUSTOM_TROJAN_CARRIER)
+        settingsTransportSummaryText.text = if (current.usesCustomCarrier || current.usesPacketChain || current.usesPrivateRelay) {
+            current.ingressLabel
         } else {
             displayTransportMode(current.transportMode)
         }
@@ -1032,8 +1034,10 @@ class MainActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration, isSelected: Boolean): String {
         val configuration = savedConfiguration.configuration
-        val endpoint = if (configuration.usesCustomCarrier) {
+        val endpoint = if (configuration.usesCustomCarrier || configuration.usesPacketChain) {
             configuration.normalizedTrojanCarrierUri
+        } else if (configuration.usesPrivateRelay) {
+            configuration.normalizedServerUrl
         } else {
             configuration.normalizedServerUrl
         }.ifBlank {
@@ -1049,6 +1053,8 @@ class MainActivity : Activity() {
         return when (mode) {
             TunnelStackMode.PACKET_NATIVE -> "Direct Packet"
             TunnelStackMode.CUSTOM_TROJAN_CARRIER -> "DirectSock"
+            TunnelStackMode.PACKET_CHAIN -> "Packet Chain"
+            TunnelStackMode.PRIVATE_RELAY -> "Private Relay"
         }
     }
 
@@ -1328,6 +1334,7 @@ class MainActivity : Activity() {
         editorHostOverrideInput.setText(editorSeedConfiguration.hostOverride)
         editorSniOverrideInput.setText(editorSeedConfiguration.sniOverride)
         editorObfsKeyInput.setText(editorSeedConfiguration.obfsKey)
+        editorUpstreamProxyInput.setText(editorSeedConfiguration.upstreamProxy)
         editorTrojanUriInput.setText(editorSeedConfiguration.trojanCarrierUri)
         editorCarrierPortInput.setText(editorSeedConfiguration.carrierProxyPort)
         editorFragmentSwitch.isChecked = editorSeedConfiguration.fragmentEnabled
@@ -1339,10 +1346,16 @@ class MainActivity : Activity() {
 
     private fun renderEditorMode() {
         val isDirectSock = editorStackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
+        val isPacketChain = editorStackMode == TunnelStackMode.PACKET_CHAIN
+        val isPrivateRelay = editorStackMode == TunnelStackMode.PRIVATE_RELAY
         editorStackValue.text = displayStackMode(editorStackMode)
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
-        editorDirectSockSection.visibility = if (isDirectSock) View.VISIBLE else View.GONE
-        editorTransportRow.text = "Transport      ${displayTransportMode(editorTransportMode)}"
+        editorDirectSockSection.visibility = if (isDirectSock || isPacketChain) View.VISIBLE else View.GONE
+        editorTransportRow.text = when {
+            isPacketChain -> "Transport      WebSocket through DirectSock"
+            isPrivateRelay -> "Transport      Private WebSocket relay"
+            else -> "Transport      ${displayTransportMode(editorTransportMode)}"
+        }
     }
 
     private fun saveConfigurationEditor() {
@@ -1357,6 +1370,7 @@ class MainActivity : Activity() {
             sniOverride = editorSniOverrideInput.text.toString(),
             transportMode = editorTransportMode,
             obfsKey = editorObfsKeyInput.text.toString(),
+            upstreamProxy = editorUpstreamProxyInput.text.toString(),
             fragmentEnabled = editorFragmentSwitch.isChecked,
             fragmentSize = editorFragmentSizeInput.text.toString(),
             trojanCarrierUri = editorTrojanUriInput.text.toString(),
