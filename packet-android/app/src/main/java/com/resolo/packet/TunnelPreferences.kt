@@ -13,11 +13,12 @@ object TunnelEvents {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var pendingLogBroadcast: Runnable? = null
 
-    fun broadcastState(context: Context, stateName: String, message: String) {
+    fun broadcastState(context: Context, stateName: String, message: String, updatedAtMs: Long) {
         val intent = Intent(TunnelActions.ACTION_STATE_UPDATED)
             .setPackage(context.packageName)
             .putExtra("state", stateName)
             .putExtra("message", message)
+            .putExtra("updatedAtMs", updatedAtMs)
         context.sendBroadcast(intent)
     }
 
@@ -62,6 +63,7 @@ object TunnelPreferences {
     private const val KEY_HOST_OVERRIDE = "host_override"
     private const val KEY_SNI_OVERRIDE = "sni_override"
     private const val KEY_TRANSPORT_MODE = "transport_mode"
+    private const val KEY_OBFS_KEY = "obfs_key"
     private const val KEY_FRAGMENT_ENABLED = "fragment_enabled"
     private const val KEY_FRAGMENT_SIZE = "fragment_size"
     private const val KEY_STATE = "state"
@@ -114,6 +116,7 @@ object TunnelPreferences {
             transportMode = TunnelTransportMode.fromRawValue(
                 preferences.getInt(KEY_TRANSPORT_MODE, defaults.transportMode.rawValue)
             ),
+            obfsKey = preferences.getString(KEY_OBFS_KEY, defaults.obfsKey) ?: defaults.obfsKey,
             fragmentEnabled = preferences.getBoolean(KEY_FRAGMENT_ENABLED, defaults.fragmentEnabled),
             fragmentSize = preferences.getString(KEY_FRAGMENT_SIZE, defaults.fragmentSize) ?: defaults.fragmentSize,
         )
@@ -153,6 +156,7 @@ object TunnelPreferences {
             .putString(KEY_HOST_OVERRIDE, configuration.hostOverride)
             .putString(KEY_SNI_OVERRIDE, configuration.sniOverride)
             .putInt(KEY_TRANSPORT_MODE, configuration.transportMode.rawValue)
+            .putString(KEY_OBFS_KEY, configuration.obfsKey)
             .putBoolean(KEY_FRAGMENT_ENABLED, configuration.fragmentEnabled)
             .putString(KEY_FRAGMENT_SIZE, configuration.fragmentSize)
     }
@@ -242,6 +246,28 @@ object TunnelPreferences {
         return updatedConfiguration
     }
 
+    fun removeConfiguration(context: Context, id: String): Boolean {
+        ensureConfigurationStore(context)
+        val preferences = prefs(context)
+        val configurations = loadSavedConfigurationsInternal(preferences)
+        val removed = configurations.removeAll { it.id == id }
+        if (!removed) return false
+
+        val editor = persistSavedConfigurations(preferences.edit(), configurations)
+        val selectedId = preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null)
+        if (selectedId == id) {
+            val next = configurations.firstOrNull()
+            if (next != null) {
+                editor.putString(KEY_SELECTED_CONFIGURATION_ID, next.id)
+                mirrorLegacyConfiguration(editor, next.configuration)
+            } else {
+                editor.remove(KEY_SELECTED_CONFIGURATION_ID)
+            }
+        }
+        editor.commit()
+        return true
+    }
+
     fun selectConfiguration(context: Context, id: String): Boolean {
         ensureConfigurationStore(context)
         val selectedConfiguration = loadSavedConfigurations(context).firstOrNull { it.id == id } ?: return false
@@ -323,7 +349,7 @@ object TunnelPreferences {
             .putString(KEY_MESSAGE, message)
             .putLong(KEY_STATE_UPDATED_AT, updatedAtMs)
             .commit()
-        TunnelEvents.broadcastState(context, state.name, message)
+        TunnelEvents.broadcastState(context, state.name, message, updatedAtMs)
     }
 
     fun loadRuntimeSnapshot(context: Context): TunnelRuntimeSnapshot {
@@ -356,10 +382,11 @@ object TunnelPreferences {
         TunnelEvents.broadcastDashboard(context, runtimeJson, json)
     }
 
-    fun syncStateLocally(context: Context, stateName: String, message: String) {
+    fun syncStateLocally(context: Context, stateName: String, message: String, updatedAtMs: Long) {
         prefs(context).edit()
             .putString(KEY_STATE, stateName)
             .putString(KEY_MESSAGE, message)
+            .putLong(KEY_STATE_UPDATED_AT, updatedAtMs)
             .apply()
     }
 

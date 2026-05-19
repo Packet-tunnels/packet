@@ -136,104 +136,162 @@ private struct ConfigurationEditorSheet: View {
                     )
                     .textInputAutocapitalization(.words)
                     .foregroundStyle(.primary)
-                } header: {
-                    Text("Profile Details")
-                }
 
-                Section {
-                    TextField("https://example.com", text: $draftConfiguration.serverURL)
-                        .keyboardType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .foregroundStyle(.primary)
-
-                    HStack {
-                        if revealsSecret {
-                            TextField("Shared Secret (Required)", text: $draftConfiguration.secret)
-                        } else {
-                            SecureField(
-                                "Shared Secret (Required)", text: $draftConfiguration.secret)
-                        }
-
-                        Button(action: { revealsSecret.toggle() }) {
-                            Image(systemName: revealsSecret ? "eye.slash" : "eye")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .foregroundStyle(.primary)
-                } header: {
-                    Text("Server Info")
-                }
-
-                Section {
-                    HStack {
-                        Text("Listen Port")
-                        Spacer()
-                        TextField("Auto", text: $draftConfiguration.listenPort)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Picker("Transport", selection: $draftConfiguration.transportMode) {
-                        ForEach(TunnelTransportMode.allCases) { mode in
+                    Picker("Stack Mode", selection: $draftConfiguration.stackMode) {
+                        ForEach(TunnelStackMode.allCases) { mode in
                             Text(mode.title).tag(mode)
                         }
                     }
                 } header: {
-                    Text("Network")
+                    Text("Profile Details")
                 }
 
-                Section {
-                    HStack {
-                        Text("CDN Edge")
-                        Spacer()
-                        TextField("Optional", text: $draftConfiguration.cdnEdge)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(.secondary)
+                if draftConfiguration.usesCustomCarrier {
+                    Section {
+                        TextField("trojan://password@edge:443?type=tcp&security=tls&fp=chrome", text: $draftConfiguration.trojanCarrierURI)
+                            .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
-                    }
+                            .foregroundStyle(.primary)
 
-                    HStack {
-                        Text("Host Override")
-                        Spacer()
-                        TextField("Optional", text: $draftConfiguration.hostOverride)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(.secondary)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-
-                    HStack {
-                        Text("SNI Override")
-                        Spacer()
-                        TextField("Optional", text: $draftConfiguration.sniOverride)
-                            .multilineTextAlignment(.trailing)
-                            .foregroundStyle(.secondary)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-
-                    Toggle("TLS Fragmentation", isOn: $draftConfiguration.fragmentEnabled)
-
-                    if draftConfiguration.fragmentEnabled {
                         HStack {
-                            Text("Fragment Size")
+                            Text("DirectSock Local Port")
                             Spacer()
-                            TextField("40", text: $draftConfiguration.fragmentSize)
+                            TextField("10808", text: $draftConfiguration.carrierProxyPort)
                                 .keyboardType(.numberPad)
                                 .multilineTextAlignment(.trailing)
                                 .foregroundStyle(.secondary)
                         }
+                    } header: {
+                        Text("DirectSock Trojan")
                     }
-                } header: {
-                    Text("Advanced")
-                } footer: {
-                    Text("Leave optional fields blank unless required by your network administrator.")
+
+                    Section {
+                        Toggle("TLS Fragmentation", isOn: $draftConfiguration.fragmentEnabled)
+
+                        if draftConfiguration.fragmentEnabled {
+                            HStack {
+                                Text("Fragment Size")
+                                Spacer()
+                                TextField("100", text: $draftConfiguration.fragmentSize)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } header: {
+                        Text("Advanced")
+                    } footer: {
+                        Text("Trojan TCP/TLS or WS/TLS link.")
+                    }
+                } else {
+                    Section {
+                        TextField("https://example.com", text: $draftConfiguration.serverURL)
+                            .keyboardType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .foregroundStyle(.primary)
+
+                        HStack {
+                            if revealsSecret {
+                                TextField("Shared Secret (Required)", text: $draftConfiguration.secret)
+                            } else {
+                                SecureField(
+                                    "Shared Secret (Required)", text: $draftConfiguration.secret)
+                            }
+
+                            Button(action: { revealsSecret.toggle() }) {
+                                Image(systemName: revealsSecret ? "eye.slash" : "eye")
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .foregroundStyle(.primary)
+                    } header: {
+                        Text("Server Info")
+                    }
+
+                    Section {
+                        HStack {
+                            Text("Listen Port")
+                            Spacer()
+                            TextField("Auto", text: $draftConfiguration.listenPort)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Picker("Transport", selection: $draftConfiguration.transportMode) {
+                            ForEach(TunnelTransportMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+
+                        if draftConfiguration.transportMode == .obfs {
+                            HStack {
+                                Text("Obfs Key")
+                                Spacer()
+                                SecureField("Optional", text: $draftConfiguration.obfsKey)
+                                    .multilineTextAlignment(.trailing)
+                                    .foregroundStyle(.secondary)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                        }
+                    } header: {
+                        Text("Network")
+                    }
+
+                    Section {
+                        HStack {
+                            Text("CDN Edge")
+                            Spacer()
+                            TextField("Optional", text: $draftConfiguration.cdnEdge)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+
+                        HStack {
+                            Text("Host Override")
+                            Spacer()
+                            TextField("Optional", text: $draftConfiguration.hostOverride)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+
+                        HStack {
+                            Text("SNI Override")
+                            Spacer()
+                            TextField("Optional", text: $draftConfiguration.sniOverride)
+                                .multilineTextAlignment(.trailing)
+                                .foregroundStyle(.secondary)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                        }
+
+                        Toggle("TLS Fragmentation", isOn: $draftConfiguration.fragmentEnabled)
+
+                        if draftConfiguration.fragmentEnabled {
+                            HStack {
+                                Text("Fragment Size")
+                                Spacer()
+                                TextField("40", text: $draftConfiguration.fragmentSize)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    } header: {
+                        Text("Advanced")
+                    } footer: {
+                        Text("Leave optional fields blank unless required by your network administrator.")
+                    }
                 }
             }
             .scrollDismissesKeyboard(.interactively)

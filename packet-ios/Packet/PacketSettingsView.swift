@@ -5,8 +5,6 @@ struct PacketSettingsView: View {
     @ObservedObject var tunnelManager: TunnelManager
     @ObservedObject var complianceStore: PacketComplianceStore
 
-    @State private var showingDisclosureSheet = false
-
     private var buildVersionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
         let version = info["CFBundleShortVersionString"] as? String ?? "Unknown"
@@ -14,155 +12,143 @@ struct PacketSettingsView: View {
         return "\(version) (\(build))"
     }
 
+    private var activeConfiguration: TunnelConfiguration {
+        tunnelManager.displayConfiguration
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    NavigationLink(
-                        destination: PrivacyDetailView(
-                            title: "VPN Disclosure",
-                            detail: PacketComplianceCopy.disclosureIntro + "\n\n"
-                                + PacketComplianceCopy.disclosureOutro,
-                            systemImage: "checkmark.shield.fill")
-                    ) {
-                        HStack(spacing: 12) {
-                            Label("VPN Disclosure", systemImage: "checkmark.shield")
-                                .foregroundStyle(.primary)
-
-                            Spacer()
-
-                            Text(
-                                complianceStore.vpnDisclosureAcknowledged
-                                    ? "Acknowledged" : "Review"
-                            )
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(
-                                complianceStore.vpnDisclosureAcknowledged ? .green : .orange
-                            )
-                        }
+                    NavigationLink(destination: PacketServersView(tunnelManager: tunnelManager)) {
+                        SettingsSummaryRow(
+                            systemImage: "server.rack",
+                            title: "Server Profiles",
+                            value: "\(tunnelManager.savedConfigurations.count)"
+                        )
                     }
 
-                    ForEach(PacketComplianceCopy.summaryItems) { item in
-                        NavigationLink(
-                            destination: PrivacyDetailView(
-                                title: item.title, detail: item.detail,
-                                systemImage: item.systemImage)
-                        ) {
-                            PrivacySummaryRow(item: item)
-                        }
+                    SettingsSummaryRow(
+                        systemImage: "point.3.connected.trianglepath.dotted",
+                        title: "Default Protocol",
+                        value: activeConfiguration.stackMode.title
+                    )
+
+                    SettingsSummaryRow(
+                        systemImage: "arrow.triangle.2.circlepath",
+                        title: "Transport",
+                        value: activeConfiguration.usesCustomCarrier
+                            ? activeConfiguration.ingressLabel
+                            : activeConfiguration.transportMode.title
+                    )
+
+                    SettingsSummaryRow(
+                        systemImage: "rectangle.compress.vertical",
+                        title: "TLS Fragmentation",
+                        value: activeConfiguration.fragmentEnabled
+                            ? "\(activeConfiguration.fragmentSizeValue) bytes"
+                            : "Off"
+                    )
+                } header: {
+                    Text("Configuration")
+                } footer: {
+                    Text("Profile, protocol, transport, and fragmentation settings are configured before connecting.")
+                }
+
+                Section {
+                    Link(destination: PacketLegalLinks.privacy) {
+                        SettingsLinkRow(systemImage: "hand.raised", title: "Privacy Policy")
+                    }
+
+                    Link(destination: PacketLegalLinks.terms) {
+                        SettingsLinkRow(systemImage: "doc.text", title: "Terms of Use")
+                    }
+
+                    Link(destination: PacketLegalLinks.support) {
+                        SettingsLinkRow(systemImage: "questionmark.circle", title: "Support")
                     }
                 } header: {
-                    Text("Privacy & Security")
+                    Text("Legal")
                 } footer: {
                     Text(PacketComplianceCopy.settingsFooterText)
                 }
 
                 Section {
                     NavigationLink(destination: AboutView(buildVersionLabel: buildVersionLabel)) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "info.circle")
-                                .foregroundStyle(.primary)
-                            Text("About & Open Source")
-                                .foregroundStyle(.primary)
-                        }
+                        SettingsSummaryRow(
+                            systemImage: "info.circle",
+                            title: "About Packet",
+                            value: buildVersionLabel
+                        )
                     }
                 } header: {
-                    Text("About Packet")
-                }
-
-                Section {
-                    Button(action: {
-                        if let url = URL(string: "https://github.com/Packet-tunnels/packet-public")
-                        {
-                            UIApplication.shared.open(url)
-                        }
-                    }) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "link.circle.fill")
-                                .font(.system(size: 20))
-                                .foregroundStyle(.primary)
-
-                            Text("Project Website & Source")
-                                .foregroundStyle(.primary)
-                        }
-                    }
-                } header: {
-                    Text("Links")
-                } footer: {
-                    Text(
-                        "Tap to visit our public Github repository to view docs and open source resources."
-                    )
+                    Text("About")
                 }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .sheet(isPresented: $showingDisclosureSheet) {
-                PacketVPNDisclosureSheet(
-                    isConnectFlow: false,
-                    acceptTitle: complianceStore.vpnDisclosureAcknowledged ? "Done" : "Acknowledge",
-                    onAccept: {
-                        complianceStore.setVPNDisclosureAcknowledged(true)
-                        showingDisclosureSheet = false
-                    },
-                    onDismiss: {
-                        showingDisclosureSheet = false
-                    }
-                )
-            }
         }
     }
 }
 
 // MARK: - Helper Views
-private struct PrivacySummaryRow: View {
-    let item: PacketComplianceSummaryItem
+private enum PacketLegalLinks {
+    static let privacy = URL(string: "https://packet-tunnels.github.io/packet-public/privacy.html")!
+    static let terms = URL(string: "https://packet-tunnels.github.io/packet-public/terms.html")!
+    static let support = URL(string: "https://packet-tunnels.github.io/packet-public/support.html")!
+}
+
+private struct SettingsSummaryRow: View {
+    let systemImage: String
+    let title: String
+    let value: String
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: item.systemImage)
+            Image(systemName: systemImage)
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .frame(width: 20)
 
-            Text(item.title)
+            Text(title)
                 .font(.system(size: 15, weight: .regular))
                 .foregroundStyle(.primary)
+
+            Spacer()
+
+            Text(value)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .padding(.vertical, 4)
     }
 }
 
-// MARK: - Detail Views
-struct PrivacyDetailView: View {
+private struct SettingsLinkRow: View {
     let title: String
-    let detail: String
     let systemImage: String
 
+    init(systemImage: String, title: String) {
+        self.title = title
+        self.systemImage = systemImage
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack(alignment: .center, spacing: 16) {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 40))
-                        .foregroundStyle(.primary)
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
 
-                    Text(title)
-                        .font(.title2.bold())
-                }
-                .padding(.bottom, 8)
+            Text(title)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundStyle(.primary)
 
-                Text(detail)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .lineSpacing(4)
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
         }
-        .navigationTitle("Details")
-        .navigationBarTitleDisplayMode(.inline)
-        .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
+        .padding(.vertical, 4)
     }
 }
 

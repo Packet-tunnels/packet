@@ -1,5 +1,6 @@
 use crate::{
-    bind_socks_listener, mesh, start_client_with_listener, ClientConfig, TlsProfile, TransportMode,
+    bind_socks_listener, mesh, start_client_with_listener, trojan_carrier, ClientConfig,
+    TlsProfile, TransportMode,
 };
 use phantom_proto::{MeshBootstrapConfig, PacketPeerDescriptor};
 use serde::Deserialize;
@@ -29,6 +30,11 @@ struct ActiveClient {
     handle: thread::JoinHandle<()>,
 }
 
+struct ActiveCarrier {
+    shutdown_tx: watch::Sender<bool>,
+    handle: thread::JoinHandle<()>,
+}
+
 #[derive(Debug, Deserialize)]
 struct MeshStartRequest {
     server_url: String,
@@ -51,10 +57,13 @@ struct MeshStartRequest {
     bootstrap: Option<MeshBootstrapConfig>,
     #[serde(default)]
     tls_profile: Option<String>,
+    #[serde(default)]
+    obfs_key: Option<String>,
 }
 
 lazy_static::lazy_static! {
     static ref ACTIVE_CLIENT: Mutex<Option<ActiveClient>> = Mutex::new(None);
+    static ref ACTIVE_CARRIER: Mutex<Option<ActiveCarrier>> = Mutex::new(None);
 }
 
 #[cfg(target_os = "android")]
@@ -235,6 +244,41 @@ fn stop_active_client() {
     }
 }
 
+fn spawn_carrier_with_bound_listener(
+    config: trojan_carrier::TrojanCarrierConfig,
+    listener: std::net::TcpListener,
+) -> i32 {
+    let actual_port = listener
+        .local_addr()
+        .map(|address| address.port())
+        .unwrap_or_default();
+
+    stop_active_carrier();
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = thread::spawn(move || {
+        let rt = Runtime::new().expect("Failed to create tokio runtime");
+        rt.block_on(async {
+            trojan_carrier::run_carrier_proxy(config, listener, shutdown_rx).await;
+        });
+    });
+
+    *ACTIVE_CARRIER.lock().unwrap() = Some(ActiveCarrier {
+        shutdown_tx,
+        handle,
+    });
+
+    i32::from(actual_port)
+}
+
+fn stop_active_carrier() {
+    let active_carrier = ACTIVE_CARRIER.lock().unwrap().take();
+    if let Some(active_carrier) = active_carrier {
+        let _ = active_carrier.shutdown_tx.send(true);
+        let _ = active_carrier.handle.join();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn phantom_emit_test_output() {
     init_logging();
@@ -262,6 +306,28 @@ pub extern "C" fn phantom_copy_mesh_stats_json() -> *mut c_char {
         .into_raw()
 }
 
+/// Runs the connection diagnostic against the given trojan:// URI and
+/// returns a human-readable report. The caller MUST free the returned
+/// string with `phantom_free_string`. Blocks until the probe completes
+/// (a few seconds). Intended to be called off the UI thread.
+#[no_mangle]
+pub extern "C" fn phantom_run_diagnostic(trojan_uri: *const c_char) -> *mut c_char {
+    init_logging();
+    let uri = unsafe {
+        if trojan_uri.is_null() {
+            return CString::new("ERROR: null uri").unwrap().into_raw();
+        }
+        CStr::from_ptr(trojan_uri).to_string_lossy().into_owned()
+    };
+    let report = match Runtime::new() {
+        Ok(rt) => rt.block_on(async { crate::diagnostic::run_diagnostic(&uri).await }),
+        Err(e) => format!("ERROR: could not start runtime: {}", e),
+    };
+    CString::new(report)
+        .unwrap_or_else(|_| CString::new("ERROR: report contained NUL").unwrap())
+        .into_raw()
+}
+
 /// Frees a string previously allocated by `phantom_copy_stats_json`.
 #[no_mangle]
 pub extern "C" fn phantom_free_string(s: *mut c_char) {
@@ -277,6 +343,71 @@ pub extern "C" fn phantom_free_string(s: *mut c_char) {
 pub extern "C" fn phantom_stop_client() {
     init_logging();
     stop_active_client();
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_stop_layered_carrier() {
+    init_logging();
+    stop_active_carrier();
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_start_layered_carrier(
+    trojan_uri: *const c_char,
+    listen_port: u16,
+) -> i32 {
+    phantom_start_layered_carrier_full(trojan_uri, listen_port, 1, 100)
+}
+
+#[no_mangle]
+pub extern "C" fn phantom_start_layered_carrier_full(
+    trojan_uri: *const c_char,
+    listen_port: u16,
+    fragment_enabled: i32,
+    fragment_size: u32,
+) -> i32 {
+    let uri = unsafe {
+        if trojan_uri.is_null() {
+            return -1;
+        }
+        CStr::from_ptr(trojan_uri).to_string_lossy().into_owned()
+    };
+
+    init_logging();
+    let mut config = match trojan_carrier::TrojanCarrierConfig::from_uri(&uri) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::error!("[carrier] ❌ {}", error);
+            return -3;
+        }
+    };
+    config.fragment_tls_hello = fragment_enabled != 0;
+    config.fragment_size_hint = if fragment_size == 0 {
+        100
+    } else {
+        fragment_size as usize
+    };
+
+    let (listener, _, actual_port) = match bind_requested_or_auto_listener(listen_port) {
+        Ok(bound) => bound,
+        Err(error) => {
+            tracing::error!("[carrier] ❌ {}", error);
+            return -2;
+        }
+    };
+
+    tracing::info!(
+        "[carrier] Starting DirectSock Trojan bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
+        actual_port,
+        config.fragment_tls_hello,
+        config.fragment_size_hint
+    );
+    crate::reset_carrier_runtime_stats(
+        config.endpoint.host.clone(),
+        Some(config.endpoint.connect_addr()),
+        actual_port,
+    );
+    spawn_carrier_with_bound_listener(config, listener)
 }
 
 #[no_mangle]
@@ -435,6 +566,7 @@ pub extern "C" fn phantom_start_cdn(
         auth_ticket: None,
         mesh_bootstrap: None,
         tls_profile: tls_profile_for_transport(&transport),
+        ..Default::default()
     };
 
     spawn_client_with_bound_listener(config, listener)
@@ -453,6 +585,7 @@ pub extern "C" fn phantom_start_full(
     fragment_enabled: i32,
     fragment_size: u32,
     tls_profile: i32,
+    obfs_key: *const c_char,
 ) -> i32 {
     let url = unsafe {
         if server_url.is_null() {
@@ -491,6 +624,18 @@ pub extern "C" fn phantom_start_full(
             Some(CStr::from_ptr(sni_override).to_string_lossy().into_owned())
         }
     };
+    let obfs_key = unsafe {
+        if obfs_key.is_null() {
+            None
+        } else {
+            let value = CStr::from_ptr(obfs_key).to_string_lossy().into_owned();
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+    };
 
     let transport = parse_transport_mode_value(transport_mode);
     let requested_tls_profile = parse_tls_profile_value(tls_profile);
@@ -518,6 +663,8 @@ pub extern "C" fn phantom_start_full(
         auth_ticket: None,
         mesh_bootstrap: None,
         tls_profile: requested_tls_profile.unwrap_or_else(|| tls_profile_for_transport(&transport)),
+        obfs_key,
+        ..Default::default()
     };
 
     spawn_client_with_bound_listener(config, listener)
@@ -586,12 +733,118 @@ pub mod android {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_runDiagnostic(
+        mut env: EnvUnowned,
+        _class: JClass,
+        trojan_uri: JString,
+    ) -> jstring {
+        env.with_env(|env| -> JniResult<jstring> {
+            let uri = trojan_uri.try_to_string(env)?;
+            init_logging();
+            let report = match Runtime::new() {
+                Ok(rt) => rt.block_on(async { crate::diagnostic::run_diagnostic(&uri).await }),
+                Err(e) => format!("ERROR: could not start runtime: {}", e),
+            };
+            let java_string = env.new_string(report)?;
+            Ok(java_string.into_raw())
+        })
+        .resolve::<LogErrorAndDefault>()
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_stopClient(
         _env: EnvUnowned,
         _class: JClass,
     ) {
         init_logging();
         stop_active_client();
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_stopLayeredCarrier(
+        _env: EnvUnowned,
+        _class: JClass,
+    ) {
+        init_logging();
+        stop_active_carrier();
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startLayeredCarrier(
+        mut env: EnvUnowned,
+        _class: JClass,
+        trojan_uri: JString,
+        listen_port: jint,
+    ) -> jint {
+        start_layered_carrier_android(&mut env, trojan_uri, listen_port, true, 100)
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_resolo_phantom_PhantomTunnel_startLayeredCarrierFull(
+        mut env: EnvUnowned,
+        _class: JClass,
+        trojan_uri: JString,
+        listen_port: jint,
+        fragment_enabled: jboolean,
+        fragment_size: jint,
+    ) -> jint {
+        start_layered_carrier_android(
+            &mut env,
+            trojan_uri,
+            listen_port,
+            fragment_enabled,
+            fragment_size,
+        )
+    }
+
+    fn start_layered_carrier_android(
+        env: &mut EnvUnowned,
+        trojan_uri: JString,
+        listen_port: jint,
+        fragment_enabled: bool,
+        fragment_size: jint,
+    ) -> jint {
+        env.with_env(|env| -> JniResult<jint> {
+            let uri = trojan_uri.try_to_string(env)?;
+            init_logging();
+
+            let mut config = match trojan_carrier::TrojanCarrierConfig::from_uri(&uri) {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::error!("[carrier] ❌ {}", error);
+                    return Ok(-3);
+                }
+            };
+            config.fragment_tls_hello = fragment_enabled;
+            config.fragment_size_hint = if fragment_size <= 0 {
+                100
+            } else {
+                fragment_size as usize
+            };
+
+            let (listener, _, actual_port) =
+                match bind_requested_or_auto_listener(listen_port as u16) {
+                    Ok(bound) => bound,
+                    Err(error) => {
+                        tracing::error!("[carrier] ❌ {}", error);
+                        return Ok(-2);
+                    }
+                };
+
+            tracing::info!(
+                "[carrier] Starting DirectSock Trojan bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
+                actual_port,
+                config.fragment_tls_hello,
+                config.fragment_size_hint
+            );
+            crate::reset_carrier_runtime_stats(
+                config.endpoint.host.clone(),
+                Some(config.endpoint.connect_addr()),
+                actual_port,
+            );
+            Ok(spawn_carrier_with_bound_listener(config, listener) as jint)
+        })
+        .resolve::<LogErrorAndDefault>()
     }
 
     /// Basic start (backward compatible)
@@ -725,6 +978,7 @@ pub mod android {
                 auth_ticket: None,
                 mesh_bootstrap: None,
                 tls_profile: tls_profile_for_transport(&transport),
+                ..Default::default()
             };
 
             Ok(spawn_client_with_bound_listener(config, listener) as jint)
@@ -747,6 +1001,7 @@ pub mod android {
         transport_mode: jint,
         fragment_enabled: jboolean,
         fragment_size: jint,
+        obfs_key: JString,
     ) -> jint {
         env.with_env(|env| -> JniResult<jint> {
             let url = server_url.try_to_string(env)?;
@@ -754,6 +1009,7 @@ pub mod android {
             let edge_str = cdn_edge.try_to_string(env).unwrap_or_default();
             let host_str = host_override.try_to_string(env).unwrap_or_default();
             let sni_str = sni_override.try_to_string(env).unwrap_or_default();
+            let obfs_key_str = obfs_key.try_to_string(env).unwrap_or_default();
 
             let edge = if edge_str.is_empty() {
                 None
@@ -769,6 +1025,11 @@ pub mod android {
                 None
             } else {
                 Some(sni_str)
+            };
+            let obfs_key = if obfs_key_str.trim().is_empty() {
+                None
+            } else {
+                Some(obfs_key_str)
             };
 
             let transport = parse_transport_mode_value(transport_mode);
@@ -796,6 +1057,8 @@ pub mod android {
                 auth_ticket: None,
                 mesh_bootstrap: None,
                 tls_profile: tls_profile_for_transport(&transport),
+                obfs_key,
+                ..Default::default()
             };
 
             tracing::info!("[PHANTOM] startClientFull: SNI={:?}", config.sni_override);
@@ -891,6 +1154,8 @@ fn start_mesh_from_json(payload: &str, listen_port_override: u16) -> Result<i32,
         sni_override: request.sni_override,
         mesh_bootstrap: request.bootstrap,
         tls_profile,
+        obfs_key: request.obfs_key.filter(|value| !value.trim().is_empty()),
+        ..Default::default()
     };
 
     Ok(spawn_client_with_bound_listener(config, listener))
@@ -901,6 +1166,7 @@ fn parse_transport_mode(value: Option<&str>) -> TransportMode {
         "ws" | "websocket" => TransportMode::WebSocket,
         "http" => TransportMode::Http,
         "stealth" | "browser" | "browser-like" | "browser_like" => TransportMode::Stealth,
+        "obfs" | "ossh" | "raw" => TransportMode::Obfs,
         _ => TransportMode::Auto,
     }
 }
@@ -910,6 +1176,7 @@ fn parse_transport_mode_value(value: i32) -> TransportMode {
         1 => TransportMode::WebSocket,
         2 => TransportMode::Http,
         3 => TransportMode::Stealth,
+        4 => TransportMode::Obfs,
         _ => TransportMode::Auto,
     }
 }

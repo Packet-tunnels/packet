@@ -2,9 +2,12 @@ package com.resolo.packet
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.text.method.HideReturnsTransformationMethod
 import android.text.method.PasswordTransformationMethod
@@ -14,6 +17,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
@@ -26,24 +30,37 @@ class SettingsActivity : Activity() {
     private lateinit var configListContainer: LinearLayout
     private lateinit var emptyStateContainer: View
     private lateinit var reconnectNote: View
-    private lateinit var disclosureStatusBadge: TextView
-    private lateinit var reviewDisclosureButton: Button
+    private lateinit var protocolSummaryText: TextView
+    private lateinit var transportSummaryText: TextView
+    private lateinit var fragmentationSummaryText: TextView
+    private lateinit var privacyLinkRow: View
+    private lateinit var termsLinkRow: View
+    private lateinit var supportLinkRow: View
+    private lateinit var aboutVersionText: TextView
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
+        forceLeftToRightLayout()
 
         backButton = findViewById(R.id.settingsBackButton)
         addButton = findViewById(R.id.settingsAddButton)
         configListContainer = findViewById(R.id.settingsConfigListContainer)
         emptyStateContainer = findViewById(R.id.settingsEmptyStateContainer)
         reconnectNote = findViewById(R.id.settingsReconnectNote)
-        disclosureStatusBadge = findViewById(R.id.settingsDisclosureStatusBadge)
-        reviewDisclosureButton = findViewById(R.id.settingsReviewDisclosureButton)
+        protocolSummaryText = findViewById(R.id.settingsProtocolSummaryText)
+        transportSummaryText = findViewById(R.id.settingsTransportSummaryText)
+        fragmentationSummaryText = findViewById(R.id.settingsFragmentationSummaryText)
+        privacyLinkRow = findViewById(R.id.settingsPrivacyLinkRow)
+        termsLinkRow = findViewById(R.id.settingsTermsLinkRow)
+        supportLinkRow = findViewById(R.id.settingsSupportLinkRow)
+        aboutVersionText = findViewById(R.id.settingsAboutVersionText)
 
         backButton.setOnClickListener { finish() }
         addButton.setOnClickListener { showConfigurationEditor(existing = null) }
-        reviewDisclosureButton.setOnClickListener { showDisclosureReview() }
+        privacyLinkRow.setOnClickListener { openUrl(PRIVACY_URL) }
+        termsLinkRow.setOnClickListener { openUrl(TERMS_URL) }
+        supportLinkRow.setOnClickListener { openUrl(SUPPORT_URL) }
 
         renderScreen()
     }
@@ -61,6 +78,8 @@ class SettingsActivity : Activity() {
     private fun renderScreen() {
         val configurations = TunnelPreferences.loadSavedConfigurations(this)
         val selectedId = TunnelPreferences.loadSelectedConfigurationId(this)
+        val currentConfiguration = TunnelPreferences.loadSelectedConfigurationEntry(this)?.configuration
+            ?: TunnelPreferences.loadConfiguration(this)
         val activeId = TunnelPreferences.loadActiveConfigurationId(this)
         val snapshot = TunnelPreferences.loadSnapshot(this)
         val runtime = TunnelPreferences.loadRuntimeSnapshot(this)
@@ -70,6 +89,18 @@ class SettingsActivity : Activity() {
             snapshot.state == TunnelState.DISCONNECTING
 
         emptyStateContainer.visibility = if (configurations.isEmpty()) View.VISIBLE else View.GONE
+        protocolSummaryText.text = currentConfiguration.stackMode.title
+        transportSummaryText.text = if (currentConfiguration.usesCustomCarrier) {
+            currentConfiguration.ingressLabel
+        } else {
+            currentConfiguration.transportLabel
+        }
+        fragmentationSummaryText.text = if (currentConfiguration.fragmentEnabled) {
+            "${currentConfiguration.fragmentSizeValue} bytes"
+        } else {
+            "Off"
+        }
+        aboutVersionText.text = "Version ${packageVersionLabel()}"
         renderConfigurationList(
             configurations = configurations,
             selectedId = selectedId,
@@ -88,13 +119,6 @@ class SettingsActivity : Activity() {
             View.GONE
         }
 
-        val disclosureAcknowledged = TunnelPreferences.isVpnDisclosureAcknowledged(this)
-        disclosureStatusBadge.text = if (disclosureAcknowledged) "Accepted" else "Required"
-        applyBadgeStyle(
-            disclosureStatusBadge,
-            textColor = Color.parseColor(if (disclosureAcknowledged) "#15803D" else "#B45309"),
-            strokeColor = Color.parseColor(if (disclosureAcknowledged) "#15803D" else "#F59E0B"),
-        )
     }
 
     private fun renderConfigurationList(
@@ -113,6 +137,7 @@ class SettingsActivity : Activity() {
                 false,
             )
             val root = row.findViewById<View>(R.id.configRowRoot)
+            root.forceLeftToRightTree()
             val title = row.findViewById<TextView>(R.id.configRowTitle)
             val subtitle = row.findViewById<TextView>(R.id.configRowSubtitle)
             val selectedBadge = row.findViewById<TextView>(R.id.configRowSelectedBadge)
@@ -176,9 +201,12 @@ class SettingsActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration): String {
         return buildList {
-            savedConfiguration.configuration.normalizedServerUrl
-                .takeIf { it.isNotBlank() }
-                ?.let(::add)
+            val endpoint = if (savedConfiguration.configuration.usesCustomCarrier) {
+                savedConfiguration.configuration.normalizedTrojanCarrierUri
+            } else {
+                savedConfiguration.configuration.normalizedServerUrl
+            }
+            endpoint.takeIf { it.isNotBlank() }?.let(::add)
             add(savedConfiguration.configuration.transportLabel)
             if (savedConfiguration.configuration.usesAdvancedStart) {
                 add(savedConfiguration.configuration.ingressLabel)
@@ -191,6 +219,7 @@ class SettingsActivity : Activity() {
     private fun showConfigurationEditor(existing: SavedTunnelConfiguration?) {
         val dialog = Dialog(this)
         dialog.setContentView(R.layout.dialog_settings)
+        dialog.forceLeftToRightLayout()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.window?.setLayout(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -198,12 +227,14 @@ class SettingsActivity : Activity() {
         )
 
         val seedConfiguration = existing?.configuration ?: TunnelConfiguration()
+        val stackModes = TunnelStackMode.values().toList()
         val transportModes = TunnelTransportMode.values().toList()
 
         val titleView = dialog.findViewById<TextView>(R.id.settingsDialogTitle)
         val closeButton = dialog.findViewById<ImageButton>(R.id.settingsCloseButton)
         val errorText = dialog.findViewById<TextView>(R.id.settingsErrorText)
         val nameInput = dialog.findViewById<EditText>(R.id.settingsConfigNameInput)
+        val stackModeSpinner = dialog.findViewById<Spinner>(R.id.settingsStackModeSpinner)
         val serverUrlInput = dialog.findViewById<EditText>(R.id.settingsServerUrlInput)
         val secretInput = dialog.findViewById<EditText>(R.id.settingsSecretInput)
         val secretToggle = dialog.findViewById<ImageButton>(R.id.secretToggleVisibility)
@@ -212,8 +243,13 @@ class SettingsActivity : Activity() {
         val cdnEdgeInput = dialog.findViewById<EditText>(R.id.settingsCdnEdgeInput)
         val hostOverrideInput = dialog.findViewById<EditText>(R.id.settingsHostOverrideInput)
         val sniOverrideInput = dialog.findViewById<EditText>(R.id.settingsSniOverrideInput)
-        val fragmentSwitch = dialog.findViewById<android.widget.Switch>(R.id.settingsFragmentSwitch)
+        val obfsKeyInput = dialog.findViewById<EditText>(R.id.settingsObfsKeyInput)
+        val fragmentToggleRow = dialog.findViewById<View>(R.id.settingsFragmentToggleRow)
+        val fragmentCheckBox = dialog.findViewById<CheckBox>(R.id.settingsFragmentCheckBox)
         val fragmentSizeInput = dialog.findViewById<EditText>(R.id.settingsFragmentSizeInput)
+        val layeredContainer = dialog.findViewById<View>(R.id.settingsLayeredContainer)
+        val trojanCarrierUriInput = dialog.findViewById<EditText>(R.id.settingsTrojanCarrierUriInput)
+        val carrierProxyPortInput = dialog.findViewById<EditText>(R.id.settingsCarrierProxyPortInput)
         val cancelButton = dialog.findViewById<Button>(R.id.settingsCancelButton)
         val saveButton = dialog.findViewById<Button>(R.id.settingsSaveButton)
 
@@ -226,8 +262,22 @@ class SettingsActivity : Activity() {
         cdnEdgeInput.setText(seedConfiguration.cdnEdge)
         hostOverrideInput.setText(seedConfiguration.hostOverride)
         sniOverrideInput.setText(seedConfiguration.sniOverride)
-        fragmentSwitch.isChecked = seedConfiguration.fragmentEnabled
+        obfsKeyInput.setText(seedConfiguration.obfsKey)
+        fragmentCheckBox.isChecked = seedConfiguration.fragmentEnabled
         fragmentSizeInput.setText(seedConfiguration.fragmentSize)
+        trojanCarrierUriInput.setText(seedConfiguration.trojanCarrierUri)
+        carrierProxyPortInput.setText(seedConfiguration.carrierProxyPort)
+
+        stackModeSpinner.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_item,
+            stackModes.map { it.title },
+        ).also { adapter ->
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        }
+        stackModeSpinner.setSelection(
+            stackModes.indexOf(seedConfiguration.stackMode).coerceAtLeast(0)
+        )
 
         transportSpinner.adapter = ArrayAdapter(
             this,
@@ -239,6 +289,21 @@ class SettingsActivity : Activity() {
         transportSpinner.setSelection(
             transportModes.indexOf(seedConfiguration.transportMode).coerceAtLeast(0)
         )
+
+        fun selectedStackMode(): TunnelStackMode {
+            return stackModes.getOrElse(stackModeSpinner.selectedItemPosition) {
+                TunnelStackMode.PACKET_NATIVE
+            }
+        }
+
+        fun updateStackVisibility() {
+            layeredContainer.visibility = if (selectedStackMode() == TunnelStackMode.CUSTOM_TROJAN_CARRIER) {
+                View.VISIBLE
+            } else {
+                View.GONE
+            }
+        }
+        updateStackVisibility()
 
         var secretVisible = false
         fun updateSecretVisibility() {
@@ -260,11 +325,29 @@ class SettingsActivity : Activity() {
             secretVisible = !secretVisible
             updateSecretVisibility()
         }
+        fragmentToggleRow.setOnClickListener {
+            fragmentCheckBox.isChecked = !fragmentCheckBox.isChecked
+        }
+        stackModeSpinner.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(
+                parent: android.widget.AdapterView<*>?,
+                view: View?,
+                position: Int,
+                id: Long,
+            ) {
+                updateStackVisibility()
+            }
+
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {
+                updateStackVisibility()
+            }
+        }
 
         closeButton.setOnClickListener { dialog.dismiss() }
         cancelButton.setOnClickListener { dialog.dismiss() }
         saveButton.setOnClickListener {
             val updatedConfiguration = TunnelConfiguration(
+                stackMode = selectedStackMode(),
                 serverUrl = serverUrlInput.text.toString(),
                 secret = secretInput.text.toString(),
                 listenPort = listenPortInput.text.toString(),
@@ -274,8 +357,11 @@ class SettingsActivity : Activity() {
                 transportMode = transportModes.getOrElse(transportSpinner.selectedItemPosition) {
                     TunnelTransportMode.AUTO
                 },
-                fragmentEnabled = fragmentSwitch.isChecked,
+                obfsKey = obfsKeyInput.text.toString(),
+                fragmentEnabled = fragmentCheckBox.isChecked,
                 fragmentSize = fragmentSizeInput.text.toString(),
+                trojanCarrierUri = trojanCarrierUriInput.text.toString(),
+                carrierProxyPort = carrierProxyPortInput.text.toString(),
             )
 
             val validationError = updatedConfiguration.validationError
@@ -314,17 +400,6 @@ class SettingsActivity : Activity() {
         dialog.show()
     }
 
-    private fun showDisclosureReview() {
-        val acknowledged = TunnelPreferences.isVpnDisclosureAcknowledged(this)
-        VpnDisclosureDialogs.show(
-            activity = this,
-            acceptTitle = if (acknowledged) "Done" else "Acknowledge",
-            dismissTitle = "Close",
-            onAccept = { renderScreen() },
-            onDismiss = { renderScreen() },
-        )
-    }
-
     private fun applyRowStyle(
         view: View,
         isSelected: Boolean,
@@ -359,5 +434,30 @@ class SettingsActivity : Activity() {
 
     private fun dpToPx(valueDp: Float): Int {
         return (valueDp * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+    }
+
+    private fun openUrl(url: String) {
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }
+    }
+
+    private fun packageVersionLabel(): String {
+        return runCatching {
+            val pkg = packageManager.getPackageInfo(packageName, 0)
+            val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                pkg.longVersionCode.toString()
+            } else {
+                @Suppress("DEPRECATION")
+                pkg.versionCode.toString()
+            }
+            "${pkg.versionName ?: "1.0"} ($versionCode)"
+        }.getOrDefault("1.0")
+    }
+
+    private companion object {
+        const val PRIVACY_URL = "https://packet-tunnels.github.io/packet-public/privacy.html"
+        const val TERMS_URL = "https://packet-tunnels.github.io/packet-public/terms.html"
+        const val SUPPORT_URL = "https://packet-tunnels.github.io/packet-public/support.html"
     }
 }

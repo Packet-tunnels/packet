@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.Settings
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -27,9 +28,13 @@ import java.util.TimeZone
 class TunnelVpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var processExitScheduled = false
-    private var connectInFlight = false
+    private var activeDisconnectId = 0
+    @Volatile private var connectInFlight = false
     private var activeConfiguration: TunnelConfiguration? = null
     private var lastRuntimeErrorLogged: String? = null
+    private val processExitRunnable = Runnable {
+        android.os.Process.killProcess(android.os.Process.myPid())
+    }
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val telemetryRunnable = object : Runnable {
@@ -71,6 +76,8 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun connectTunnel() {
+        cancelProcessExit()
+        activeDisconnectId = 0
         if (connectInFlight) {
             TunnelLogStore.append(this, "[VPN] Connect request ignored because startup is already in progress")
             return
@@ -181,8 +188,51 @@ class TunnelVpnService : VpnService() {
                     ),
                 )
 
+                val egressProbe = waitForInternetEgress(configuration, listenPort)
+                if (!egressProbe.succeeded) {
+                    if (!connectInFlight) {
+                        TunnelLogStore.append(this@TunnelVpnService, "[DIAG] Internet probe stopped because startup was cancelled")
+                        return@Thread
+                    }
+
+                    val message = "Tunnel internet probe failed: ${egressProbe.detail}"
+                    val failedRuntime = TunnelPreferences.loadRuntimeSnapshot(this@TunnelVpnService)
+                        .copy(listenPort = listenPort, tunnelActive = false, lastError = message)
+                    TunnelPreferences.updateRuntimeSnapshot(this@TunnelVpnService, failedRuntime)
+                    TunnelPreferences.updateDiagnostics(
+                        this@TunnelVpnService,
+                        TunnelPreferences.loadDiagnostics(this@TunnelVpnService).copy(
+                            recommendation = buildRecommendation(
+                                configuration = configuration,
+                                diagnostics = TunnelPreferences.loadDiagnostics(this@TunnelVpnService),
+                                lastError = message,
+                                runtime = failedRuntime,
+                            ),
+                            lastFailureDetail = message,
+                            lastUpdatedMs = System.currentTimeMillis(),
+                        ),
+                    )
+                    mainHandler.post {
+                        failStart(message)
+                    }
+                    return@Thread
+                }
+
+                TunnelLogStore.append(
+                    this@TunnelVpnService,
+                    buildString {
+                        append("[DIAG] Internet egress probe passed through local proxy via ${egressProbe.target}")
+                        egressProbe.countryName?.let { append(" country=$it") }
+                    },
+                )
+
+                if (!connectInFlight) {
+                    TunnelLogStore.append(this@TunnelVpnService, "[DIAG] Startup cancelled before Android VPN interface creation")
+                    return@Thread
+                }
+
                 mainHandler.post {
-                    completeTunnelConnection(configuration, listenPort)
+                    completeTunnelConnection(configuration, listenPort, egressProbe)
                 }
             } catch (e: Exception) {
                 mainHandler.post {
@@ -192,7 +242,11 @@ class TunnelVpnService : VpnService() {
         }.start()
     }
 
-    private fun completeTunnelConnection(configuration: TunnelConfiguration, listenPort: Int) {
+    private fun completeTunnelConnection(
+        configuration: TunnelConfiguration,
+        listenPort: Int,
+        egressProbe: EgressProbeResult,
+    ) {
         val builder = createVpnBuilder()
 
         vpnInterface = try {
@@ -248,6 +302,18 @@ class TunnelVpnService : VpnService() {
             ),
         )
 
+        TunnelPreferences.updateRuntimeSnapshot(
+            this,
+            TunnelPreferences.loadRuntimeSnapshot(this).copy(
+                listenPort = listenPort,
+                tunnelActive = true,
+                egressPingMs = egressProbe.durationMs.toInt().takeIf { it > 0 },
+                egressTarget = egressProbe.target,
+                serverCountryCode = egressProbe.countryCode,
+                serverCountryName = egressProbe.countryName,
+            ),
+        )
+
         TunnelPreferences.updateState(
             this,
             TunnelState.RUNNING,
@@ -259,11 +325,32 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun disconnectTunnel(message: String) {
+        val disconnectId = activeDisconnectId + 1
+        activeDisconnectId = disconnectId
         connectInFlight = false
         TunnelPreferences.updateState(this, TunnelState.DISCONNECTING, "Stopping Android VPN service")
         TunnelLogStore.append(this, "[VPN] Stop requested")
         stopTelemetryRefresh()
-        closeInterface()
+        Thread {
+            closeInterface()
+            mainHandler.post {
+                finishDisconnect(disconnectId, message)
+            }
+        }.start()
+        mainHandler.postDelayed({
+            if (activeDisconnectId == disconnectId) {
+                TunnelLogStore.append(this, "[VPN] Stop cleanup timed out; resetting tunnel process")
+                finishDisconnect(disconnectId, message)
+            }
+        }, DISCONNECT_CLEANUP_TIMEOUT_MS)
+    }
+
+    private fun finishDisconnect(disconnectId: Int, message: String) {
+        if (activeDisconnectId != disconnectId) {
+            return
+        }
+
+        activeDisconnectId = 0
         stopForeground(STOP_FOREGROUND_REMOVE)
 
         TunnelPreferences.updateRuntimeSnapshot(
@@ -337,6 +424,8 @@ class TunnelVpnService : VpnService() {
 
     private fun closeInterface() {
         runCatching { PacketBridge.stopTun2Socks() }
+        runCatching { PacketBridge.stopClient() }
+        runCatching { PacketBridge.stopLayeredCarrier() }
         runCatching { vpnInterface?.close() }
         vpnInterface = null
     }
@@ -370,9 +459,16 @@ class TunnelVpnService : VpnService() {
         }
 
         processExitScheduled = true
-        mainHandler.postDelayed({
-            android.os.Process.killProcess(android.os.Process.myPid())
-        }, 250)
+        mainHandler.postDelayed(processExitRunnable, 250)
+    }
+
+    private fun cancelProcessExit() {
+        if (!processExitScheduled) {
+            return
+        }
+
+        mainHandler.removeCallbacks(processExitRunnable)
+        processExitScheduled = false
     }
 
     private fun startTelemetryRefresh() {
@@ -388,7 +484,11 @@ class TunnelVpnService : VpnService() {
         val configuration = activeConfiguration
             ?: TunnelPreferences.loadActiveConfiguration(this)
             ?: TunnelPreferences.loadConfiguration(this)
-        val runtimeSnapshot = TunnelRuntimeSnapshot.fromJsonString(PacketBridge.copyStatsJson())
+        val previousRuntime = TunnelPreferences.loadRuntimeSnapshot(this)
+        val runtimeSnapshot = mergeRuntimeProbeMetadata(
+            TunnelRuntimeSnapshot.fromJsonString(PacketBridge.copyStatsJson()),
+            previousRuntime,
+        )
         TunnelPreferences.updateRuntimeSnapshot(this, runtimeSnapshot)
 
         if (!runtimeSnapshot.lastError.isNullOrBlank() && runtimeSnapshot.lastError != lastRuntimeErrorLogged) {
@@ -412,7 +512,32 @@ class TunnelVpnService : VpnService() {
         )
     }
 
+    private fun mergeRuntimeProbeMetadata(
+        runtimeSnapshot: TunnelRuntimeSnapshot,
+        previousRuntime: TunnelRuntimeSnapshot,
+    ): TunnelRuntimeSnapshot {
+        if (!runtimeSnapshot.tunnelActive) {
+            return runtimeSnapshot
+        }
+
+        return runtimeSnapshot.copy(
+            serverCountryCode = runtimeSnapshot.serverCountryCode ?: previousRuntime.serverCountryCode,
+            serverCountryName = runtimeSnapshot.serverCountryName ?: previousRuntime.serverCountryName,
+            egressPingMs = runtimeSnapshot.egressPingMs ?: previousRuntime.egressPingMs,
+            egressTarget = runtimeSnapshot.egressTarget ?: previousRuntime.egressTarget,
+        )
+    }
+
     private fun startRustCore(configuration: TunnelConfiguration): Int {
+        if (configuration.usesCustomCarrier) {
+            return PacketBridge.startLayeredCarrierFull(
+                configuration.normalizedTrojanCarrierUri,
+                configuration.carrierProxyPortValue,
+                configuration.fragmentEnabled,
+                configuration.fragmentSizeValue,
+            )
+        }
+
         val listenPort = configuration.listenPortValue ?: 0
         return if (configuration.usesAdvancedStart) {
             PacketBridge.startClientFull(
@@ -425,6 +550,7 @@ class TunnelVpnService : VpnService() {
                 configuration.transportMode.rawValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
+                configuration.normalizedObfsKey,
             )
         } else {
             PacketBridge.startClient(
@@ -463,6 +589,261 @@ class TunnelVpnService : VpnService() {
                 true
             }
         }.getOrDefault(false)
+    }
+
+    private fun waitForInternetEgress(
+        configuration: TunnelConfiguration,
+        listenPort: Int,
+    ): EgressProbeResult {
+        val timeoutMs = if (configuration.usesCustomCarrier) {
+            CARRIER_EGRESS_TIMEOUT_MS
+        } else {
+            STANDARD_EGRESS_TIMEOUT_MS
+        }
+        val startedAt = System.currentTimeMillis()
+        val deadline = startedAt + timeoutMs
+        val label = if (configuration.usesCustomCarrier) "DirectSock" else "tunnel"
+        var attempts = 0
+        var lastProbe = EgressProbeResult(
+            succeeded = false,
+            target = "none",
+            detail = "Internet probe did not run.",
+            durationMs = 0,
+            countryCode = null,
+            countryName = null,
+        )
+
+        TunnelPreferences.updateState(
+            this,
+            TunnelState.CONNECTING,
+            "Waiting for $label internet access",
+        )
+        updateNotification("Testing network access")
+        TunnelLogStore.append(
+            this,
+            "[DIAG] Waiting up to ${timeoutMs / 1000}s for real internet egress through 127.0.0.1:$listenPort",
+        )
+
+        while (System.currentTimeMillis() < deadline) {
+            if (!connectInFlight) {
+                return lastProbe.copy(detail = "Startup was cancelled.")
+            }
+
+            attempts += 1
+            lastProbe = probeInternetThroughSocks(listenPort)
+            if (lastProbe.succeeded) {
+                return lastProbe
+            }
+
+            val elapsedSeconds = (System.currentTimeMillis() - startedAt) / 1000
+            val remainingSeconds = ((deadline - System.currentTimeMillis()).coerceAtLeast(0)) / 1000
+            if (attempts == 1 || attempts % 3 == 0) {
+                TunnelLogStore.append(
+                    this,
+                    "[DIAG] $label internet probe still waiting after ${elapsedSeconds}s: ${lastProbe.detail}",
+                )
+            }
+            TunnelPreferences.updateState(
+                this,
+                TunnelState.CONNECTING,
+                "Waiting for $label internet access (${remainingSeconds}s left)",
+            )
+            TunnelPreferences.updateDiagnostics(
+                this,
+                TunnelPreferences.loadDiagnostics(this).copy(
+                    localProxyReady = true,
+                    vpnShellReady = false,
+                    healthStatus = "Internet probe pending",
+                    lastFailureDetail = lastProbe.detail,
+                    lastUpdatedMs = System.currentTimeMillis(),
+                ),
+            )
+
+            Thread.sleep(EGRESS_RETRY_DELAY_MS)
+        }
+
+        return lastProbe.copy(
+            detail = "No HTTP response through 127.0.0.1:$listenPort within ${timeoutMs / 1000}s. Last error: ${lastProbe.detail}",
+        )
+    }
+
+    private fun probeInternetThroughSocks(listenPort: Int): EgressProbeResult {
+        val failures = mutableListOf<String>()
+        var firstSuccessfulProbe: EgressProbeResult? = null
+
+        for (target in EGRESS_PROBE_TARGETS) {
+            val startedAt = System.currentTimeMillis()
+            try {
+                Socket().use { socket ->
+                    socket.soTimeout = EGRESS_SOCKET_TIMEOUT_MS
+                    socket.connect(InetSocketAddress("127.0.0.1", listenPort), EGRESS_CONNECT_TIMEOUT_MS)
+
+                    val input = socket.getInputStream()
+                    val output = socket.getOutputStream()
+
+                    output.write(byteArrayOf(0x05.toByte(), 0x01.toByte(), 0x00.toByte()))
+                    output.flush()
+
+                    val authReply = readExact(input, 2)
+                    if (authReply[0].toInt() != 0x05 || authReply[1].toInt() != 0x00) {
+                        throw IllegalStateException("SOCKS5 auth failed")
+                    }
+
+                    val hostBytes = target.host.toByteArray(Charsets.US_ASCII)
+                    val request = ByteArray(7 + hostBytes.size)
+                    request[0] = 0x05.toByte()
+                    request[1] = 0x01.toByte()
+                    request[2] = 0x00.toByte()
+                    request[3] = 0x03.toByte()
+                    request[4] = hostBytes.size.toByte()
+                    System.arraycopy(hostBytes, 0, request, 5, hostBytes.size)
+                    request[5 + hostBytes.size] = ((target.port shr 8) and 0xFF).toByte()
+                    request[6 + hostBytes.size] = (target.port and 0xFF).toByte()
+
+                    output.write(request)
+                    output.flush()
+
+                    val connectReply = readExact(input, 4)
+                    if (connectReply[0].toInt() != 0x05) {
+                        throw IllegalStateException("Invalid SOCKS5 reply")
+                    }
+                    if (connectReply[1].toInt() != 0x00) {
+                        throw IllegalStateException(
+                            "SOCKS5 CONNECT failed: ${socksReplyCodeLabel(connectReply[1].toInt() and 0xFF)}",
+                        )
+                    }
+                    consumeSocksBindAddress(input, connectReply[3].toInt() and 0xFF)
+
+                    output.write(target.request.toByteArray(Charsets.US_ASCII))
+                    output.flush()
+
+                    val responseBuffer = ByteArray(1024)
+                    val bytesRead = input.read(responseBuffer)
+                    if (bytesRead <= 0) {
+                        throw IllegalStateException("CONNECT succeeded but no HTTP bytes returned")
+                    }
+
+                    val rawResponse = String(responseBuffer, 0, bytesRead, Charsets.US_ASCII)
+                    val preview = rawResponse
+                        .replace('\n', ' ')
+                        .replace('\r', ' ')
+                    if (!preview.startsWith("HTTP/")) {
+                        throw IllegalStateException("Non-HTTP response: ${preview.take(80)}")
+                    }
+
+                    val country = parseProbeCountry(target.host, rawResponse)
+                    val result = EgressProbeResult(
+                        succeeded = true,
+                        target = "${target.host}:${target.port}",
+                        detail = preview.take(80),
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        countryCode = country.code,
+                        countryName = country.name,
+                    )
+                    if (result.countryCode != null || result.countryName != null) {
+                        return result
+                    }
+                    if (firstSuccessfulProbe == null) {
+                        firstSuccessfulProbe = result
+                    }
+                }
+            } catch (error: Exception) {
+                failures += "${target.host}:${target.port} -> ${error.localizedMessage ?: error.javaClass.simpleName}"
+            }
+        }
+
+        firstSuccessfulProbe?.let { return it }
+
+        return EgressProbeResult(
+            succeeded = false,
+            target = EGRESS_PROBE_TARGETS.joinToString(", ") { "${it.host}:${it.port}" },
+            detail = failures.joinToString(" | "),
+            durationMs = 0,
+            countryCode = null,
+            countryName = null,
+        )
+    }
+
+    private fun parseProbeCountry(host: String, rawResponse: String): ProbeCountry {
+        parseTraceCountryCode(rawResponse)?.let { code ->
+            return ProbeCountry(
+                code = code,
+                name = Locale("", code).displayCountry,
+            )
+        }
+
+        if (!host.equals("ip-api.com", ignoreCase = true)) {
+            return ProbeCountry(null, null)
+        }
+
+        val body = rawResponse.substringAfter("\r\n\r\n", rawResponse)
+        val lines = body.lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        val codeIndex = lines.indexOfFirst { line ->
+            line.length == 2 && line.all { it.isLetter() } && line.uppercase(Locale.US) == line
+        }
+        if (codeIndex < 0) {
+            return ProbeCountry(null, null)
+        }
+
+        val code = lines[codeIndex].uppercase(Locale.US)
+        val name = lines.getOrNull(codeIndex - 1)
+            ?.takeIf { it.length > 2 && it.any(Char::isLetter) }
+            ?: Locale("", code).displayCountry
+        return ProbeCountry(code, name)
+    }
+
+    private fun parseTraceCountryCode(preview: String): String? {
+        val marker = "loc="
+        val start = preview.indexOf(marker)
+        if (start < 0) {
+            return null
+        }
+
+        val code = preview.drop(start + marker.length)
+            .takeWhile { it.isLetter() }
+            .uppercase(Locale.US)
+        return code.takeIf { it.length == 2 }
+    }
+
+    private fun readExact(input: InputStream, byteCount: Int): ByteArray {
+        val buffer = ByteArray(byteCount)
+        var offset = 0
+        while (offset < byteCount) {
+            val read = input.read(buffer, offset, byteCount - offset)
+            if (read < 0) {
+                throw IllegalStateException("Expected $byteCount bytes, got $offset")
+            }
+            offset += read
+        }
+        return buffer
+    }
+
+    private fun consumeSocksBindAddress(input: InputStream, addressType: Int) {
+        when (addressType) {
+            0x01 -> readExact(input, 6)
+            0x03 -> {
+                val hostLength = readExact(input, 1)[0].toInt() and 0xFF
+                readExact(input, hostLength + 2)
+            }
+            0x04 -> readExact(input, 18)
+            else -> throw IllegalStateException("Unsupported SOCKS5 bind address type $addressType")
+        }
+    }
+
+    private fun socksReplyCodeLabel(code: Int): String {
+        return when (code) {
+            0x01 -> "general failure"
+            0x02 -> "connection not allowed"
+            0x03 -> "network unreachable"
+            0x04 -> "host unreachable"
+            0x05 -> "connection refused"
+            0x06 -> "TTL expired"
+            0x07 -> "command not supported"
+            0x08 -> "address type not supported"
+            else -> "code $code"
+        }
     }
 
     private fun performPreflightDiagnostics(configuration: TunnelConfiguration): TunnelDiagnosticsSnapshot {
@@ -513,6 +894,18 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun logStartupEvidence(configuration: TunnelConfiguration) {
+        if (configuration.usesCustomCarrier) {
+            TunnelLogStore.append(
+                this,
+                "[DIAG] Config summary: stack=directsock_trojan endpoint=${configuration.endpointHost}:${configuration.endpointPort} " +
+                    "local_proxy=${configuration.carrierProxyPortValue}",
+            )
+            TunnelLogStore.append(this, "[DIAG] Device clock: ${deviceClockSummary()}")
+            TunnelLogStore.append(this, "[DIAG] Active network: ${activeNetworkSummary()}")
+            TunnelLogStore.append(this, "[DIAG] Android Private DNS: ${privateDnsSummary()}")
+            return
+        }
+
         TunnelLogStore.append(
             this,
             "[DIAG] Config summary: server_url=${configuration.normalizedServerUrl} server_host=${configuration.serverHost} " +
@@ -569,7 +962,11 @@ class TunnelVpnService : VpnService() {
 
         if (diagnostics.localProxyReady && diagnostics.vpnShellReady) {
             parts.add(
-                "Full-device forwarding is active. Device traffic is routed through tun2socks into $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
+                if (configuration.usesCustomCarrier) {
+                    "Full-device forwarding is active. Device traffic is routed through tun2socks into DirectSock on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
+                } else {
+                    "Full-device forwarding is active. Device traffic is routed through tun2socks into $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
+                }
             )
             parts.add("UDP and Android Private DNS are not supported end-to-end yet, so some apps may fail or retry.")
         } else if (diagnostics.localProxyReady) {
@@ -586,7 +983,7 @@ class TunnelVpnService : VpnService() {
     private fun initialRuntimeSnapshot(configuration: TunnelConfiguration): TunnelRuntimeSnapshot {
         return TunnelRuntimeSnapshot(
             state = "starting",
-            transport = configuration.transportLabel,
+            transport = if (configuration.usesCustomCarrier) configuration.ingressLabel else configuration.transportLabel,
             serverHost = configuration.serverHost,
             cdnEdge = configuration.normalizedCdnEdge.takeIf { it.isNotBlank() },
             tunnelActive = false,
@@ -610,6 +1007,12 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun validate(configuration: TunnelConfiguration): String? {
+        configuration.validationError?.let { return it }
+
+        if (configuration.usesCustomCarrier) {
+            return null
+        }
+
         if (configuration.normalizedServerUrl.isEmpty()) {
             return "Server URL is required."
         }
@@ -817,14 +1220,67 @@ class TunnelVpnService : VpnService() {
         val error: String?,
     )
 
+    private data class EgressProbeTarget(
+        val host: String,
+        val port: Int,
+        val request: String,
+    )
+
+    private data class EgressProbeResult(
+        val succeeded: Boolean,
+        val target: String,
+        val detail: String,
+        val durationMs: Long,
+        val countryCode: String?,
+        val countryName: String?,
+    )
+
+    private data class ProbeCountry(
+        val code: String?,
+        val name: String?,
+    )
+
     private companion object {
         const val NOTIFICATION_CHANNEL_ID = "packet_status"
         const val NOTIFICATION_ID = 1001
         const val TELEMETRY_REFRESH_MS = 1_000L
+        const val CARRIER_EGRESS_TIMEOUT_MS = 300_000L
+        const val STANDARD_EGRESS_TIMEOUT_MS = 300_000L
+        const val EGRESS_RETRY_DELAY_MS = 2_000L
+        const val DISCONNECT_CLEANUP_TIMEOUT_MS = 3_500L
+        const val EGRESS_CONNECT_TIMEOUT_MS = 1_500
+        const val EGRESS_SOCKET_TIMEOUT_MS = 5_000
         const val VPN_MTU = 1500
         const val VPN_TUN_ADDRESS = "172.19.0.1"
         const val VPN_TUN_PREFIX = 30
         const val VPN_DNS_SERVER = "198.18.0.2"
         const val LOCAL_SOCKS_HOST = "127.0.0.1"
+        val EGRESS_PROBE_TARGETS = listOf(
+            EgressProbeTarget(
+                host = "cloudflare.com",
+                port = 80,
+                request = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: cloudflare.com\r\nConnection: close\r\n\r\n",
+            ),
+            EgressProbeTarget(
+                host = "ip-api.com",
+                port = 80,
+                request = "GET /line/?fields=country,countryCode,query HTTP/1.1\r\nHost: ip-api.com\r\nConnection: close\r\n\r\n",
+            ),
+            EgressProbeTarget(
+                host = "connectivitycheck.gstatic.com",
+                port = 80,
+                request = "GET /generate_204 HTTP/1.1\r\nHost: connectivitycheck.gstatic.com\r\nConnection: close\r\n\r\n",
+            ),
+            EgressProbeTarget(
+                host = "example.com",
+                port = 80,
+                request = "HEAD / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+            ),
+            EgressProbeTarget(
+                host = "neverssl.com",
+                port = 80,
+                request = "HEAD / HTTP/1.1\r\nHost: neverssl.com\r\nConnection: close\r\n\r\n",
+            ),
+        )
     }
 }

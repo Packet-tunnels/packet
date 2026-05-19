@@ -15,7 +15,8 @@ Primary Apple sources reviewed:
 Implemented in this repo:
 
 - Dedicated in-app VPN disclosure before first connect, with explicit local-storage, traffic-handling, and tracking statements.
-- Re-openable privacy and security summary in Settings.
+- Settings ordered for review: configuration summary first, public legal links second, About last.
+- Public HTML pages for privacy policy, terms of use, and support in `packet-public`.
 - Privacy manifests bundled for both the app and the packet tunnel extension.
 - App-level export-compliance declaration in the generated Info.plist settings.
 - Network Extension entitlements already present for the app and extension.
@@ -40,6 +41,8 @@ Suggested public URLs for App Store Connect once GitHub Pages is enabled on `Pac
 
 - Support URL: `https://packet-tunnels.github.io/packet-public/`
 - Privacy Policy URL: `https://packet-tunnels.github.io/packet-public/privacy.html`
+- Terms URL used in app: `https://packet-tunnels.github.io/packet-public/terms.html`
+- Support page used in app: `https://packet-tunnels.github.io/packet-public/support.html`
 
 Why these are acceptable:
 

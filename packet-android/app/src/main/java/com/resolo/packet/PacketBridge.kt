@@ -30,6 +30,29 @@ class PacketBridge {
         }
 
         @JvmStatic
+        fun startLayeredCarrier(trojanUri: String, listenPort: Int): Int =
+            PhantomTunnel.startLayeredCarrier(trojanUri, listenPort)
+
+        @JvmStatic
+        fun startLayeredCarrierFull(
+            trojanUri: String,
+            listenPort: Int,
+            fragmentEnabled: Boolean,
+            fragmentSize: Int,
+        ): Int =
+            PhantomTunnel.startLayeredCarrierFull(
+                trojanUri,
+                listenPort,
+                fragmentEnabled,
+                fragmentSize,
+            )
+
+        @JvmStatic
+        fun stopLayeredCarrier() {
+            PhantomTunnel.stopLayeredCarrier()
+        }
+
+        @JvmStatic
         fun startClient(serverUrl: String, secret: String, listenPort: Int): Int =
             PhantomTunnel.startClient(serverUrl, secret, listenPort)
 
@@ -70,6 +93,7 @@ class PacketBridge {
             transportMode: Int,
             fragmentEnabled: Boolean,
             fragmentSize: Int,
+            obfsKey: String,
         ): Int =
             PhantomTunnel.startClientFull(
                 serverUrl,
@@ -81,6 +105,7 @@ class PacketBridge {
                 transportMode,
                 fragmentEnabled,
                 fragmentSize,
+                obfsKey,
             )
 
         @JvmStatic

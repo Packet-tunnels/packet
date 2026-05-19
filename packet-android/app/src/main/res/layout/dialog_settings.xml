@@ -78,6 +78,25 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
+            android:text="STACK MODE"
+            android:textColor="#6B7280"
+            android:textSize="9sp"
+            android:textStyle="bold" />
+
+        <Spinner
+            android:id="@+id/settingsStackModeSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_outline_field"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:spinnerMode="dropdown" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
             android:text="SERVER URL"
             android:textColor="#6B7280"
             android:textSize="9sp"
@@ -293,6 +312,29 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="OBFS KEY"
+            android:textColor="#6B7280"
+            android:textSize="9sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/settingsObfsKeyInput"
+            android:layout_width="match_parent"
+            android:layout_height="46dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_outline_field"
+            android:hint="Optional"
+            android:inputType="textPassword"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:textColor="#111827"
+            android:textColorHint="#9CA3AF"
+            android:textSize="13sp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
             android:layout_marginTop="24dp"
             android:text="ADVANCED (DPI BYPASS)"
             android:textColor="#6B7280"
@@ -300,20 +342,37 @@
             android:textStyle="bold" />
 
         <LinearLayout
+            android:id="@+id/settingsFragmentToggleRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:gravity="center_vertical"
             android:orientation="horizontal">
 
-            <Switch
-                android:id="@+id/settingsFragmentSwitch"
+            <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="TLS Fragmentation"
-                android:textColor="#111827"
-                android:textSize="13sp" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <CheckBox
+                    android:id="@+id/settingsFragmentCheckBox"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
+                    android:buttonTint="#111827"
+                    android:checked="true"
+                    android:contentDescription="TLS Fragmentation" />
+
+                <TextView
+                    android:id="@+id/settingsFragmentLabel"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="TLS Fragmentation"
+                    android:textColor="#111827"
+                    android:textSize="13sp" />
+            </LinearLayout>
 
             <LinearLayout
                 android:layout_width="100dp"
@@ -343,6 +402,53 @@
                     android:textColorHint="#9CA3AF"
                     android:textSize="13sp" />
             </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/settingsLayeredContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="DIRECTSOCK TROJAN"
+                android:textColor="#6B7280"
+                android:textSize="9sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/settingsTrojanCarrierUriInput"
+                android:layout_width="match_parent"
+                android:layout_height="70dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_outline_field"
+                android:gravity="top"
+                android:hint="trojan://password@edge.example:443?security=tls&amp;type=tcp&amp;fp=chrome&amp;sni=front.example"
+                android:inputType="textUri|textMultiLine"
+                android:paddingStart="14dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="10dp"
+                android:textColor="#111827"
+                android:textColorHint="#9CA3AF"
+                android:textSize="12sp" />
+
+            <EditText
+                android:id="@+id/settingsCarrierProxyPortInput"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_outline_field"
+                android:hint="DirectSock local port (10808)"
+                android:inputType="number"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:textColor="#111827"
+                android:textColorHint="#9CA3AF"
+                android:textSize="13sp" />
         </LinearLayout>
 
         <TextView

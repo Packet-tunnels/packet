@@ -21,6 +21,7 @@ use axum::{
 };
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
+use phantom_proto::obfs::{self, ObfsStream};
 use phantom_proto::*;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -49,6 +50,21 @@ struct Cli {
     /// Max allowed auth timestamp drift in seconds
     #[arg(long, default_value = "120")]
     max_drift: u64,
+
+    /// Optional raw-TCP obfuscated ("OSSH-style") tunnel port. When set, a
+    /// second listener accepts connections whose wire bytes are uniform
+    /// random from byte 0 (no TLS ClientHello) — this is the transport
+    /// designed to slip past Iran's "RST any foreign TLS handshake" filter.
+    /// Point a directly-reachable foreign IP at this port (NOT a
+    /// TLS-terminating CDN).
+    #[arg(long, env = "PHANTOM_OBFS_PORT")]
+    obfs_port: Option<u16>,
+
+    /// Pre-shared obfuscation "knock" for the obfs port. Low-entropy is
+    /// fine — confidentiality is still the inner frame crypto. Must match
+    /// the client's --obfs-key. Required only if --obfs-port is set.
+    #[arg(long, env = "PHANTOM_OBFS_KEY", default_value = "phantom-obfs")]
+    obfs_key: String,
 }
 
 // ─── Server State ──────────────────────────────────────────────
@@ -248,12 +264,192 @@ async fn main() {
         .route("/api/v1/lessons/broadcast", get(relay_upgrade))
         // Health check (looks normal)
         .route("/api/v1/health", get(health_check))
-        .with_state(state);
+        .with_state(state.clone());
+
+    // Optional raw-TCP obfuscated tunnel listener (Iran escape transport).
+    if let Some(obfs_port) = cli.obfs_port {
+        let obfs_state = state.clone();
+        let obfs_key = cli.obfs_key.clone().into_bytes();
+        let obfs_addr = format!("0.0.0.0:{}", obfs_port);
+        tokio::spawn(async move {
+            run_obfs_listener(obfs_addr, obfs_key, obfs_state).await;
+        });
+        info!(
+            "[PHANTOM] OBFS raw-TCP tunnel listener ENABLED on port {}",
+            obfs_port
+        );
+    }
 
     let addr = format!("0.0.0.0:{}", cli.port);
     let listener = TcpListener::bind(&addr).await.unwrap();
     info!("Listening on {}", addr);
     axum::serve(listener, app).await.unwrap();
+}
+
+// ─── OBFS Raw-TCP Tunnel ───────────────────────────────────────
+// Mirrors `handle_websocket` exactly — same auth (`validate_transport_auth`),
+// same `Session`, same `process_upstream_frame_with_relay` — but the byte
+// transport is `ObfsStream` over raw TCP instead of WebSocket-over-TLS.
+// Message boundaries (which WS gave us for free) come from the u32-LE
+// length-prefixed `obfs::write_msg`/`read_msg` framing.
+
+async fn run_obfs_listener(addr: String, obfs_key: Vec<u8>, state: Arc<AppState>) {
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("[PHANTOM] OBFS bind {} failed: {}", addr, e);
+            return;
+        }
+    };
+    info!("[PHANTOM] OBFS listening on {}", addr);
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("[PHANTOM] OBFS accept error: {}", e);
+                continue;
+            }
+        };
+        let _ = tcp.set_nodelay(true);
+        let state = state.clone();
+        let obfs_key = obfs_key.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_obfs_conn(tcp, &obfs_key, state).await {
+                // Most errors here are scanners / wrong-key / dropped probes.
+                // Keep them at debug so the log isn't noisy.
+                tracing::debug!("[PHANTOM] OBFS conn from {} ended: {}", peer, e);
+            }
+        });
+    }
+}
+
+async fn handle_obfs_conn(
+    tcp: TcpStream,
+    obfs_key: &[u8],
+    state: Arc<AppState>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Obfs handshake. A magic mismatch (scanner / wrong key) errors out fast.
+    let mut s = ObfsStream::accept_server(tcp, obfs_key).await?;
+
+    // ── Auth (one length-delimited JSON message, same shape as WS) ──
+    let auth_bytes =
+        tokio::time::timeout(Duration::from_secs(10), obfs::read_msg(&mut s)).await??;
+    let auth: AuthRequest = serde_json::from_slice(&auth_bytes)?;
+
+    let validated = match validate_transport_auth(&state, &auth).await {
+        Ok(v) => v,
+        Err(error) => {
+            warn!("[PHANTOM] OBFS auth rejected: {}", error);
+            let _ = obfs::write_msg(&mut s, br#"{"error":"unauthorized"}"#).await;
+            return Ok(());
+        }
+    };
+
+    let token = generate_session_token();
+    let session = Arc::new(Session::new(validated.key));
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(token.clone(), session.clone());
+    let has_relay = state.get_relay().await.is_some();
+
+    let resp = serde_json::json!({
+        "token": &token,
+        "relay": has_relay,
+        "auth_mode": validated.mode,
+        "bridge_id": validated.bridge_id,
+    })
+    .to_string();
+    obfs::write_msg(&mut s, resp.as_bytes()).await?;
+    info!(
+        "[PHANTOM] ✓ OBFS session established: {}... (relay: {}, mode: {})",
+        &token[..token.len().min(16)],
+        has_relay,
+        validated.mode
+    );
+
+    let key = session.key;
+    let (mut rd, mut wr) = tokio::io::split(s);
+
+    // Sender: downstream frames → obfs (mirror of the WS sender task).
+    let session_tx = session.clone();
+    let sender_task = tokio::spawn(async move {
+        let mut rx = session_tx.downstream_rx.lock().await;
+        loop {
+            let mut frames = Vec::new();
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Some(frame) => frames.push(frame),
+                        None => break,
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(25)) => {
+                    // Keepalive: an empty framed message keeps the TCP path
+                    // warm without looking like anything structured.
+                    if obfs::write_msg(&mut wr, &[]).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            while let Ok(f) = rx.try_recv() {
+                frames.push(f);
+                if frames.len() >= 256 {
+                    break;
+                }
+            }
+            if !frames.is_empty() {
+                let plaintext = encode_frames(&frames);
+                let encrypted = encrypt(&key, &plaintext);
+                if obfs::write_msg(&mut wr, &encrypted).await.is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Receiver: obfs → upstream frame processing (mirror of WS receiver).
+    let session_rx = session.clone();
+    let rx_state = state.clone();
+    let receiver_task = tokio::spawn(async move {
+        loop {
+            let msg = match obfs::read_msg(&mut rd).await {
+                Ok(m) => m,
+                Err(_) => break,
+            };
+            if msg.is_empty() {
+                continue; // client keepalive
+            }
+            match decrypt(&key, &msg) {
+                Ok(plaintext) => match decode_frames(&plaintext) {
+                    Ok(frames) => {
+                        for frame in frames {
+                            process_upstream_frame_with_relay(frame, &session_rx, &rx_state)
+                                .await;
+                        }
+                    }
+                    Err(e) => error!("[PHANTOM] OBFS frame decode error: {}", e),
+                },
+                Err(e) => {
+                    error!("[PHANTOM] OBFS decrypt error: {} (key mismatch?)", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    tokio::select! {
+        _ = sender_task => {}
+        _ = receiver_task => {}
+    }
+    state.sessions.lock().await.remove(&token);
+    info!(
+        "[PHANTOM] OBFS session closed: {}...",
+        &token[..token.len().min(16)]
+    );
+    Ok(())
 }
 
 // ─── Real Website Handlers (Camouflage) ────────────────────────

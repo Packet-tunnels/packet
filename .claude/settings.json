@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(adb devices *)",
+      "Bash(adb kill-server *)",
+      "Bash(adb start-server *)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(gradle --version)",
+      "Bash(brew install *)",
+      "Bash(gradle assembleDebug -x test)",
+      "Bash(rm -f app/src/main/res/drawable/ic_*.svg && ls app/src/main/res/drawable/ic_* | head -10)",
+      "Bash(gradle clean *)",
+      "Bash(adb install *)",
+      "Bash(adb shell *)",
+      "Bash(gradle assembleDebug)",
+      "Bash(adb logcat *)",
+      "Bash(timeout 90 python3 packet-android/scripts/diagnostic.py)",
+      "Bash(python3 packet-android/scripts/diagnostic.py)",
+      "Bash(emulator -list-avds)",
+      "Bash(emulator -avd Medium_Phone)",
+      "Bash(gradle build *)",
+      "Bash(pkill -f \"gradle build\")",
+      "Bash(awk '{print \"CPU:\", $3\"%\", \"MEM:\", $4\"%\"}')",
+      "Bash(tee /tmp/build.log)",
+      "Bash(cargo test *)",
+      "Bash(ls -la ~/Library/Caches/ | grep -i meta)",
+      "Read(//Users/mohammadshayani/Library/Caches/**)",
+      "Bash(pkill -f MetaTrader)",
+      "Bash(find ~/Library -type d -iname \"*meta*\" -o -iname \"*trader*\" 2>/dev/null | grep -i -E \"\\(meta|trader|wine\\)\")",
+      "Read(//Users/mohammadshayani/Library/**)",
+      "Bash(sudo dscacheutil -flushcache)",
+      "Bash(rm -rf /tmp/*metatrader* /var/tmp/*metatrader*)"
+    ],
+    "additionalDirectories": [
+      "/Users/mohammadshayani/Desktop/packet/packet-android/app/src/main/res/drawable"
+    ]
+  }
+}

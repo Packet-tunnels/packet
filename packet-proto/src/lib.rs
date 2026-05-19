@@ -17,6 +17,7 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod fragment;
+pub mod obfs;
 pub mod onion;
 
 type HmacSha256 = Hmac<Sha256>;

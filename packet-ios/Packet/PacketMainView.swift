@@ -57,7 +57,7 @@ struct PacketMainView: View {
                         .foregroundStyle(statusColor)
                         .tracking(1.0)
 
-                    if tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive {
+                    if tunnelManager.telemetry.snapshot.tunnelActive {
                         if let connectedSince = tunnelManager.telemetry.snapshot.connectedSince {
                             Text(Date(timeIntervalSince1970: TimeInterval(connectedSince)), style: .timer)
                                 .font(.system(size: 20, weight: .semibold, design: .rounded).monospacedDigit())
@@ -68,7 +68,7 @@ struct PacketMainView: View {
                                 .foregroundStyle(.primary)
                         }
                     } else {
-                        Text("Not Protected")
+                        Text(tunnelManager.state == .launching ? "Connecting" : "Not Protected")
                             .font(.system(size: 20, weight: .semibold, design: .rounded))
                             .foregroundStyle(.primary)
                     }
@@ -134,6 +134,9 @@ struct PacketMainView: View {
         let telemetry = tunnelManager.telemetry
         let snapshot = telemetry.snapshot
         let configuration = tunnelManager.displayConfiguration
+        let hasConfiguredEndpoint = configuration.usesCustomCarrier
+            ? !configuration.normalizedTrojanCarrierURI.isEmpty
+            : !configuration.normalizedServerURL.isEmpty
 
         return LazyVGrid(columns: metricColumns, spacing: 16) {
             ModernMetricTile(
@@ -146,12 +149,26 @@ struct PacketMainView: View {
             ModernMetricTile(
                 icon: "server.rack",
                 title: "Endpoint",
-                value: configuration.normalizedServerURL.isEmpty
+                value: !hasConfiguredEndpoint
                     ? "Not configured"
                     : configuration.endpointHost,
-                detail: configuration.normalizedServerURL.isEmpty
+                detail: !hasConfiguredEndpoint
                     ? "Missing URL"
                     : "\(configuration.remoteAddress)"
+            )
+
+            ModernMetricTile(
+                icon: "mappin.and.ellipse",
+                title: "Server Country",
+                value: snapshot.tunnelActive ? telemetry.countryLabel : "Unknown",
+                detail: serverCountryDetail
+            )
+
+            ModernMetricTile(
+                icon: "wifi",
+                title: "Ping",
+                value: pingMetricValue,
+                detail: pingMetricDetail
             )
 
             ModernMetricTile(
@@ -192,7 +209,6 @@ struct PacketMainView: View {
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
-        .disabled(tunnelManager.isBusy)
     }
 
     // MARK: - Properties & Logic
@@ -235,10 +251,8 @@ struct PacketMainView: View {
         if tunnelManager.state == .failed {
             return tunnelManager.lastResult.nilIfEmpty ?? "Unknown connection error"
         }
-        if !tunnelManager.isRunning,
-            (configuration.normalizedServerURL.isEmpty || configuration.normalizedSecret.isEmpty)
-        {
-            return "Configuration incomplete. Add the server URL and shared secret in Settings."
+        if !tunnelManager.isRunning, let validationError = configuration.validationError {
+            return validationError
         }
         return nil
     }
@@ -247,7 +261,7 @@ struct PacketMainView: View {
         let selectedConfiguration = tunnelManager.selectedConfigurationDisplayName
 
         guard
-            (tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive),
+            tunnelManager.telemetry.snapshot.tunnelActive,
             let activeConfiguration = tunnelManager.activeConfigurationDisplayName
         else {
             return "Selected configuration: \(selectedConfiguration)"
@@ -264,11 +278,45 @@ struct PacketMainView: View {
         let snapshot = tunnelManager.telemetry.snapshot
         let configuration = tunnelManager.displayConfiguration
         let port = snapshot.listenPort.map { String($0) }
+            ?? (configuration.usesCustomCarrier
+                ? String(configuration.effectiveCarrierProxyPort)
+                : nil)
             ?? configuration.listenPortValue.map { String($0) }
             ?? configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
             ?? "Auto"
 
         return "\(snapshot.state.nilIfEmpty ?? tunnelManager.state.rawValue.capitalized) • Port \(port)"
+    }
+
+    private var serverCountryDetail: String {
+        let snapshot = tunnelManager.telemetry.snapshot
+        if let target = snapshot.egressTarget?.nilIfEmpty {
+            return "Probe: \(target)"
+        }
+
+        return snapshot.tunnelActive ? "Probe country unavailable" : "Waiting for probe"
+    }
+
+    private var pingMetricValue: String {
+        let snapshot = tunnelManager.telemetry.snapshot
+        guard let ping = snapshot.egressPingMs ?? snapshot.lastPingMs else {
+            return "--"
+        }
+
+        return "\(ping) ms"
+    }
+
+    private var pingMetricDetail: String {
+        let snapshot = tunnelManager.telemetry.snapshot
+        if snapshot.egressPingMs != nil {
+            return "Internet probe"
+        }
+
+        if snapshot.lastPingMs != nil {
+            return "Transport round-trip"
+        }
+
+        return "Not measured"
     }
 
     private var primaryActionTitle: String {

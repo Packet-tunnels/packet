@@ -53,6 +53,12 @@ pub enum TransportMode {
     Auto,
     /// Browser-like HTTPS POST transport for stricter DPI environments.
     Stealth,
+    /// Raw-TCP OSSH-style obfuscated transport. No TLS ClientHello, no HTTP,
+    /// no SNI — the wire is uniform random from byte 0. Designed to slip
+    /// past Iran's "RST any foreign TLS handshake" filter. Connects to a
+    /// directly-reachable foreign IP:port (passed via `cdn_edge`), NOT a
+    /// TLS-terminating CDN.
+    Obfs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +88,14 @@ pub struct TransportConfig {
     pub spki_pins: Vec<String>,
     /// TLS and HTTP header shaping profile.
     pub tls_profile: TlsProfile,
+    /// Optional lane/profile-specific ALPN override.
+    pub alpn_override: Option<Vec<Vec<u8>>>,
+    /// Optional lane/profile-specific User-Agent override.
+    pub user_agent_override: Option<String>,
+    /// Pre-shared obfuscation "knock" for `TransportMode::Obfs`. Must match
+    /// the server's `--obfs-key`. Low-entropy is fine — the real crypto is
+    /// the inner frame layer.
+    pub obfs_key: Option<String>,
 }
 
 impl TransportConfig {
@@ -325,7 +339,9 @@ fn apply_tls_profile(
     mut tls_config: RustlsClientConfig,
     config: &TransportConfig,
 ) -> RustlsClientConfig {
-    if config.uses_browser_like_tls() {
+    if let Some(alpn) = config.alpn_override.as_ref() {
+        tls_config.alpn_protocols = alpn.clone();
+    } else if config.uses_browser_like_tls() {
         // This is not an exact Chrome/uTLS ClientHello, but it matches the
         // critical browser ALPN set used by fronted HTTPS POST transports.
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
@@ -375,6 +391,150 @@ pub async fn run_transport(
         }
         TransportMode::Auto => {
             run_auto_loop(config, upstream_rx, tunnel_state).await;
+        }
+        TransportMode::Obfs => {
+            run_obfs_loop(config, upstream_rx, tunnel_state).await;
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OBFS Raw-TCP Transport (Iran escape path)
+// ═══════════════════════════════════════════════════════════════
+//
+// Connects raw TCP to a directly-reachable foreign IP:port (passed via
+// `cdn_edge`), runs the OSSH-style obfs handshake so the wire is uniform
+// random from byte 0, then speaks phantom's exact framed protocol over it
+// using length-delimited messages. No TLS ClientHello, no SNI, no HTTP —
+// nothing for Iran's "RST any foreign TLS handshake" classifier to fire on.
+
+async fn run_obfs_loop(
+    config: TransportConfig,
+    mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: Arc<Mutex<TunnelState>>,
+) {
+    let mut retry_count = 0u32;
+    loop {
+        let addr = config.connect_addr();
+        set_runtime_state("connecting");
+        info!("[PHANTOM] OBFS connecting: addr={}", addr);
+        match obfs_session(&config, &mut upstream_rx, &tunnel_state).await {
+            Ok(()) => {
+                warn!("[PHANTOM] OBFS session ended gracefully, reconnecting in 500ms...");
+                retry_count = 0;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                retry_count += 1;
+                let delay = std::cmp::min(2u64.pow(retry_count.min(5)), 30);
+                set_runtime_state("reconnecting");
+                set_runtime_last_error(e.to_string());
+                error!(
+                    "[PHANTOM] ❌ OBFS FAILED: {} | retry #{} in {}s | addr={}",
+                    e, retry_count, delay, addr
+                );
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+            }
+        }
+    }
+}
+
+async fn obfs_session(
+    config: &TransportConfig,
+    upstream_rx: &mut mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: &Arc<Mutex<TunnelState>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use phantom_proto::obfs::{self, ObfsStream};
+
+    let started_at = Instant::now();
+    let addr = config.connect_addr();
+    let obfs_key = config
+        .obfs_key
+        .clone()
+        .unwrap_or_else(|| "phantom-obfs".to_string());
+
+    let tcp = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| format!("OBFS TCP connect timeout to {}", addr))?
+        .map_err(|e| format!("OBFS TCP connect to {} failed: {}", addr, e))?;
+    let _ = tcp.set_nodelay(true);
+
+    let stream = ObfsStream::connect_client(tcp, obfs_key.as_bytes())
+        .await
+        .map_err(|e| format!("OBFS handshake failed: {}", e))?;
+    let (mut rd, mut wr) = tokio::io::split(stream);
+    let key = config.key;
+
+    // ── Auth (one length-delimited JSON message, same shape as WS) ──
+    let auth_request = build_transport_auth_request(config, Some("mesh_client"));
+    let auth_json = serde_json::to_string(&auth_request)?;
+    obfs::write_msg(&mut wr, auth_json.as_bytes())
+        .await
+        .map_err(|e| format!("OBFS auth send failed: {}", e))?;
+
+    let auth_resp = tokio::time::timeout(Duration::from_secs(10), obfs::read_msg(&mut rd))
+        .await
+        .map_err(|_| "OBFS auth timeout: server did not respond within 10s")?
+        .map_err(|e| format!("OBFS auth read failed: {}", e))?;
+    let json: serde_json::Value = serde_json::from_slice(&auth_resp)
+        .map_err(|e| format!("OBFS auth response not JSON: {}", e))?;
+    if let Some(err) = json.get("error") {
+        return Err(format!("❌ OBFS auth REJECTED by server: {}", err).into());
+    }
+    let token = json["token"].as_str().unwrap_or("unknown");
+    info!(
+        "[PHANTOM] ✓ OBFS authenticated — session: {}...",
+        &token[..token.len().min(16)]
+    );
+    mesh::set_status("connected");
+    mesh::clear_last_error();
+    let ping_ms = started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    set_runtime_connected(Some(ping_ms));
+    info!("[PHANTOM] ✓ OBFS TUNNEL ACTIVE — relay is live");
+
+    // ── Bidirectional relay (single-loop select!, mirrors ws path) ──
+    loop {
+        tokio::select! {
+            msg = upstream_rx.recv() => {
+                match msg {
+                    Some(msg) => {
+                        let mut frames = Vec::new();
+                        process_upstream_msg(msg, &mut frames, tunnel_state).await;
+                        while let Ok(msg) = upstream_rx.try_recv() {
+                            process_upstream_msg(msg, &mut frames, tunnel_state).await;
+                        }
+                        if !frames.is_empty() {
+                            let plaintext = encode_frames(&frames);
+                            let encrypted = encrypt(&key, &plaintext);
+                            obfs::write_msg(&mut wr, &encrypted).await
+                                .map_err(|e| format!("OBFS send failed: {}", e))?;
+                        }
+                    }
+                    None => {
+                        error!("[PHANTOM] OBFS upstream channel closed");
+                        return Ok(());
+                    }
+                }
+            }
+            framed = obfs::read_msg(&mut rd) => {
+                let data = framed.map_err(|e| format!("OBFS receive error: {}", e))?;
+                if data.is_empty() {
+                    continue; // server keepalive
+                }
+                match decrypt(&key, &data) {
+                    Ok(plaintext) => match decode_frames(&plaintext) {
+                        Ok(frames) => {
+                            let app_frames: Vec<_> = frames
+                                .into_iter()
+                                .filter(|f| f.cmd != Cmd::Relay)
+                                .collect();
+                            dispatch_downstream(app_frames, tunnel_state).await;
+                        }
+                        Err(e) => error!("[PHANTOM] OBFS frame decode error: {}", e),
+                    },
+                    Err(e) => error!("[PHANTOM] OBFS decrypt failed: {}", e),
+                }
+            }
         }
     }
 }
@@ -449,6 +609,10 @@ async fn ws_session(
     } else {
         format!("http://{}", host)
     };
+    let ws_user_agent = config
+        .user_agent_override
+        .clone()
+        .unwrap_or_else(|| random_user_agent().to_string());
 
     let request = http::Request::builder()
         .uri(&ws_uri)
@@ -458,7 +622,7 @@ async fn ws_session(
         .header("Upgrade", "websocket")
         .header("Sec-WebSocket-Version", "13")
         .header("Sec-WebSocket-Key", &ws_key)
-        .header("User-Agent", random_user_agent())
+        .header("User-Agent", ws_user_agent)
         .header("Accept-Language", "en-US,en;q=0.9,fa;q=0.8")
         .header("Cache-Control", "no-cache")
         .header("Pragma", "no-cache")
@@ -477,8 +641,7 @@ async fn ws_session(
 
     let tcp = if config.fragment_enabled {
         info!(
-            "[PHANTOM] TCP fragmentation enabled ({}B chunks) for {} handshake",
-            config.fragment_size,
+            "[PHANTOM] TCP fragmentation enabled (v2rayNG tlshello: 5x random 100-150B, 10-20ms delays) for {} handshake",
             if config.is_tls() {
                 "TLS"
             } else {
@@ -1080,16 +1243,21 @@ fn apply_browser_like_http_headers(
         return request;
     }
 
+    let user_agent = config
+        .user_agent_override
+        .as_deref()
+        .unwrap_or("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+
     request
-        .header(
-            reqwest::header::USER_AGENT,
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        )
+        .header(reqwest::header::USER_AGENT, user_agent)
         .header(reqwest::header::ACCEPT, "application/json, text/plain, */*")
         .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9,fa;q=0.8")
         .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .header("Pragma", "no-cache")
-        .header("Sec-CH-UA", "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"")
+        .header(
+            "Sec-CH-UA",
+            "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
+        )
         .header("Sec-CH-UA-Mobile", "?0")
         .header("Sec-CH-UA-Platform", "\"Windows\"")
         .header("Sec-Fetch-Dest", "empty")

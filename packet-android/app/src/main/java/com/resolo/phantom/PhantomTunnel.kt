@@ -19,8 +19,30 @@ object PhantomTunnel {
     @JvmStatic
     external fun copyMeshStatsJson(): String?
 
+    /**
+     * Runs the connection diagnostic against the given trojan:// URI and
+     * returns a copy-pasteable text report. Blocks for a few seconds —
+     * call from a background thread, never the UI thread.
+     */
+    @JvmStatic
+    external fun runDiagnostic(trojanUri: String): String
+
     @JvmStatic
     external fun stopClient()
+
+    @JvmStatic
+    external fun startLayeredCarrier(trojanUri: String, listenPort: Int): Int
+
+    @JvmStatic
+    external fun startLayeredCarrierFull(
+        trojanUri: String,
+        listenPort: Int,
+        fragmentEnabled: Boolean,
+        fragmentSize: Int,
+    ): Int
+
+    @JvmStatic
+    external fun stopLayeredCarrier()
 
     @JvmStatic
     external fun startClient(serverUrl: String, secret: String, listenPort: Int): Int
@@ -52,6 +74,7 @@ object PhantomTunnel {
         transportMode: Int,
         fragmentEnabled: Boolean,
         fragmentSize: Int,
+        obfsKey: String,
     ): Int
 
     @JvmStatic

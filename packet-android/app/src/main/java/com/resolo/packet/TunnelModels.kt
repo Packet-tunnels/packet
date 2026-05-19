@@ -17,11 +17,23 @@ enum class TunnelTransportMode(val rawValue: Int, val title: String) {
     AUTO(0, "Auto"),
     WEBSOCKET(1, "WebSocket"),
     HTTP(2, "HTTP"),
-    STEALTH(3, "Stealth");
+    STEALTH(3, "Stealth"),
+    OBFS(4, "Obfs");
 
     companion object {
         fun fromRawValue(value: Int): TunnelTransportMode {
             return values().firstOrNull { it.rawValue == value } ?: AUTO
+        }
+    }
+}
+
+enum class TunnelStackMode(val rawValue: Int, val title: String) {
+    PACKET_NATIVE(0, "Packet Native"),
+    CUSTOM_TROJAN_CARRIER(1, "DirectSock");
+
+    companion object {
+        fun fromRawValue(value: Int): TunnelStackMode {
+            return values().firstOrNull { it.rawValue == value } ?: PACKET_NATIVE
         }
     }
 }
@@ -39,6 +51,7 @@ enum class TunnelState(val title: String) {
 }
 
 data class TunnelConfiguration(
+    val stackMode: TunnelStackMode = TunnelStackMode.PACKET_NATIVE,
     val serverUrl: String = "",
     val secret: String = "",
     val listenPort: String = "",
@@ -46,16 +59,21 @@ data class TunnelConfiguration(
     val hostOverride: String = "",
     val sniOverride: String = "",
     val transportMode: TunnelTransportMode = TunnelTransportMode.AUTO,
-    val fragmentEnabled: Boolean = false,
+    val obfsKey: String = "",
+    val fragmentEnabled: Boolean = true,
     val fragmentSize: String = "40",
+    val trojanCarrierUri: String = "",
+    val carrierProxyPort: String = "10808",
 ) {
     val isEmpty: Boolean
-        get() = normalizedServerUrl.isEmpty() &&
+        get() = stackMode == TunnelStackMode.PACKET_NATIVE &&
+            normalizedServerUrl.isEmpty() &&
             normalizedSecret.isEmpty() &&
             listenPort.trim().isEmpty() &&
             normalizedCdnEdge.isEmpty() &&
             normalizedHostOverride.isEmpty() &&
             normalizedSniOverride.isEmpty() &&
+            normalizedObfsKey.isEmpty() &&
             transportMode == TunnelTransportMode.AUTO
 
     val normalizedServerUrl: String
@@ -72,6 +90,15 @@ data class TunnelConfiguration(
 
     val normalizedSniOverride: String
         get() = sniOverride.trim()
+
+    val normalizedObfsKey: String
+        get() = obfsKey.trim()
+
+    val normalizedTrojanCarrierUri: String
+        get() = trojanCarrierUri.trim()
+
+    val usesCustomCarrier: Boolean
+        get() = stackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
 
     val cdnEdgeValidationError: String?
         get() {
@@ -106,15 +133,24 @@ data class TunnelConfiguration(
             normalizedSniOverride.isNotEmpty()
 
     val usesAdvancedStart: Boolean
-        get() = usesCdn || transportMode != TunnelTransportMode.AUTO || fragmentEnabled
+        get() = usesCustomCarrier ||
+            usesCdn ||
+            transportMode != TunnelTransportMode.AUTO ||
+            normalizedObfsKey.isNotEmpty() ||
+            fragmentEnabled
 
     val ingressLabel: String
         get() = when {
+            usesCustomCarrier -> "DirectSock"
+            transportMode == TunnelTransportMode.OBFS -> "Obfs raw TCP"
             transportMode == TunnelTransportMode.STEALTH -> "Stealth TLS"
             normalizedSniOverride.isNotEmpty() -> "SNI fronting"
             normalizedCdnEdge.isNotEmpty() || normalizedHostOverride.isNotEmpty() -> "CDN relay"
             else -> "Standard endpoint"
         }
+
+    val carrierProxyPortValue: Int
+        get() = carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } ?: 10808
 
     val listenPortValue: Int?
         get() {
@@ -135,6 +171,10 @@ data class TunnelConfiguration(
 
     val serverHost: String
         get() {
+            if (usesCustomCarrier) {
+                return carrierEndpointHost
+            }
+
             val parsedHost = runCatching { Uri.parse(normalizedServerUrl).host }.getOrNull()
             if (!parsedHost.isNullOrBlank()) {
                 return parsedHost
@@ -150,6 +190,10 @@ data class TunnelConfiguration(
 
     val endpointHost: String
         get() {
+            if (usesCustomCarrier) {
+                return carrierEndpointHost
+            }
+
             if (cdnEdgeValidationError != null) {
                 return serverHost
             }
@@ -159,6 +203,10 @@ data class TunnelConfiguration(
 
     val endpointPort: Int
         get() {
+            if (usesCustomCarrier) {
+                return carrierEndpointPort
+            }
+
             if (cdnEdgeValidationError != null) {
                 val parsedPort = runCatching { Uri.parse(normalizedServerUrl).port }.getOrNull()
                 if (parsedPort != null && parsedPort > 0) {
@@ -181,11 +229,31 @@ data class TunnelConfiguration(
             return if (normalizedServerUrl.startsWith("https")) 443 else 80
         }
 
+    private val carrierEndpointHost: String
+        get() {
+            return runCatching { Uri.parse(normalizedTrojanCarrierUri).host }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?: "Unavailable"
+        }
+
+    private val carrierEndpointPort: Int
+        get() {
+            return runCatching { Uri.parse(normalizedTrojanCarrierUri).port }
+                .getOrNull()
+                ?.takeIf { it > 0 }
+                ?: 443
+        }
+
     val transportLabel: String
         get() = transportMode.title
 
     val suggestedName: String
         get() {
+            if (usesCustomCarrier) {
+                return "DirectSock"
+            }
+
             if (normalizedHostOverride.isNotEmpty()) {
                 return normalizedHostOverride
             }
@@ -204,6 +272,19 @@ data class TunnelConfiguration(
 
     val validationError: String?
         get() {
+            if (usesCustomCarrier) {
+                if (normalizedTrojanCarrierUri.isEmpty()) {
+                    return "Trojan URI is required for DirectSock mode."
+                }
+                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
+                    return "DirectSock URI must start with trojan://."
+                }
+                if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
+                    return "DirectSock local port must be 1024-65535."
+                }
+                return null
+            }
+
             if (normalizedServerUrl.isEmpty()) {
                 return "Server URL is required."
             }
@@ -234,11 +315,16 @@ data class TunnelConfiguration(
                 return "Stealth transport requires an https:// server URL."
             }
 
+            if (transportMode == TunnelTransportMode.OBFS && normalizedCdnEdge.isEmpty()) {
+                return "Obfs transport requires CDN Edge set to the direct server IP:port, for example 103.241.67.247:36571."
+            }
+
             return null
         }
 
     fun toJsonObject(): JSONObject {
         return JSONObject()
+            .put("stack_mode", stackMode.rawValue)
             .put("server_url", serverUrl)
             .put("secret", secret)
             .put("listen_port", listenPort)
@@ -246,11 +332,19 @@ data class TunnelConfiguration(
             .put("host_override", hostOverride)
             .put("sni_override", sniOverride)
             .put("transport_mode", transportMode.rawValue)
+            .put("obfs_key", obfsKey)
+            .put("fragment_enabled", fragmentEnabled)
+            .put("fragment_size", fragmentSize)
+            .put("trojan_carrier_uri", trojanCarrierUri)
+            .put("carrier_proxy_port", carrierProxyPort)
     }
 
     companion object {
         fun fromJsonObject(json: JSONObject): TunnelConfiguration {
             return TunnelConfiguration(
+                stackMode = TunnelStackMode.fromRawValue(
+                    json.optInt("stack_mode", TunnelStackMode.PACKET_NATIVE.rawValue)
+                ),
                 serverUrl = json.optString("server_url", ""),
                 secret = json.optString("secret", ""),
                 listenPort = json.optString("listen_port", ""),
@@ -260,6 +354,11 @@ data class TunnelConfiguration(
                 transportMode = TunnelTransportMode.fromRawValue(
                     json.optInt("transport_mode", TunnelTransportMode.AUTO.rawValue)
                 ),
+                obfsKey = json.optString("obfs_key", ""),
+                fragmentEnabled = json.optBoolean("fragment_enabled", true),
+                fragmentSize = json.optString("fragment_size", "40"),
+                trojanCarrierUri = json.optString("trojan_carrier_uri", ""),
+                carrierProxyPort = json.optString("carrier_proxy_port", "10808"),
             )
         }
     }
@@ -277,7 +376,11 @@ data class SavedTunnelConfiguration(
         get() = trimmedName.ifEmpty { configuration.suggestedName }
 
     val subtitle: String
-        get() = configuration.normalizedServerUrl.ifBlank { "Not configured" }
+        get() = if (configuration.usesCustomCarrier) {
+            configuration.normalizedTrojanCarrierUri.ifBlank { "DirectSock not configured" }
+        } else {
+            configuration.normalizedServerUrl.ifBlank { "Not configured" }
+        }
 
     fun toJsonObject(): JSONObject {
         return JSONObject()
@@ -328,6 +431,10 @@ data class TunnelRuntimeSnapshot(
     val transport: String = "Unknown",
     val serverHost: String = "",
     val cdnEdge: String? = null,
+    val serverCountryCode: String? = null,
+    val serverCountryName: String? = null,
+    val egressPingMs: Int? = null,
+    val egressTarget: String? = null,
     val listenPort: Int? = null,
     val bytesUp: Long = 0,
     val bytesDown: Long = 0,
@@ -347,6 +454,10 @@ data class TunnelRuntimeSnapshot(
             .put("transport", transport)
             .put("server_host", serverHost)
             .put("cdn_edge", cdnEdge)
+            .put("server_country_code", serverCountryCode)
+            .put("server_country_name", serverCountryName)
+            .put("egress_ping_ms", egressPingMs)
+            .put("egress_target", egressTarget)
             .put("listen_port", listenPort)
             .put("bytes_up", bytesUp)
             .put("bytes_down", bytesDown)
@@ -374,6 +485,10 @@ data class TunnelRuntimeSnapshot(
                     transport = json.optString("transport", "Unknown"),
                     serverHost = json.optString("server_host", ""),
                     cdnEdge = json.optNullableString("cdn_edge"),
+                    serverCountryCode = json.optNullableString("server_country_code"),
+                    serverCountryName = json.optNullableString("server_country_name"),
+                    egressPingMs = json.optInt("egress_ping_ms").takeIf { it > 0 },
+                    egressTarget = json.optNullableString("egress_target"),
                     listenPort = json.optInt("listen_port").takeIf { it > 0 },
                     bytesUp = json.optLong("bytes_up", 0),
                     bytesDown = json.optLong("bytes_down", 0),

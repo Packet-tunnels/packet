@@ -10,6 +10,19 @@ char *phantom_copy_stats_json(void);
 char *phantom_copy_mesh_stats_json(void);
 void phantom_free_string(char *value);
 void phantom_stop_client(void);
+void phantom_stop_layered_carrier(void);
+
+// DirectSock start: local mixed HTTP/SOCKS proxy -> Trojan TCP/WS TLS carrier
+int32_t phantom_start_layered_carrier(
+    const char *trojan_uri,
+    uint16_t listen_port
+);
+int32_t phantom_start_layered_carrier_full(
+    const char *trojan_uri,
+    uint16_t listen_port,
+    int32_t fragment_enabled,
+    uint32_t fragment_size
+);
 
 // Basic start
 int32_t phantom_start(
@@ -39,7 +52,8 @@ int32_t phantom_start_full(
     int32_t transport_mode,
     int32_t fragment_enabled,
     uint32_t fragment_size,
-    int32_t tls_profile
+    int32_t tls_profile,
+    const char *obfs_key
 );
 
 // Native Packet mesh start

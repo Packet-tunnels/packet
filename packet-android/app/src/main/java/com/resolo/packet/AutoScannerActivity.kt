@@ -42,6 +42,14 @@ class AutoScannerActivity : Activity() {
     private var isScanning = false
     private var scanThread: Thread? = null
     private var baseConfiguration: TunnelConfiguration? = null
+    private val scannerLogLock = Any()
+    private val scannerLogLines = mutableListOf<String>()
+
+    private val scanLogCallback = object : PacketBridge.LogCallback {
+        override fun onLog(message: String) {
+            TunnelLogStore.append(applicationContext, message.trimEnd())
+        }
+    }
 
     private val scanResultsArray = JSONArray()
     private val probeTargets = listOf(
@@ -87,6 +95,7 @@ class AutoScannerActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_auto_scanner)
+        forceLeftToRightLayout()
 
         backButton = findViewById(R.id.backButton)
         startScanButton = findViewById(R.id.startScanButton)
@@ -96,6 +105,7 @@ class AutoScannerActivity : Activity() {
         resultScrollView = findViewById(R.id.resultScrollView)
         exportJsonButton = findViewById(R.id.exportJsonButton)
 
+        PacketBridge.setLogCallback(scanLogCallback)
         baseConfiguration = TunnelPreferences.loadConfiguration(this)
 
         backButton.setOnClickListener { finish() }
@@ -138,6 +148,9 @@ class AutoScannerActivity : Activity() {
 
         while (scanResultsArray.length() > 0) {
             scanResultsArray.remove(0)
+        }
+        synchronized(scannerLogLock) {
+            scannerLogLines.clear()
         }
 
         resultLogText.text = "Initializing Scanner...\n"
@@ -292,7 +305,8 @@ class AutoScannerActivity : Activity() {
                     profile.sniOverride,
                     profile.transportMode.rawValue,
                     profile.fragmentEnabled,
-                    profile.fragmentSizeValue
+                    profile.fragmentSizeValue,
+                    profile.obfsKey
                 )
 
                 resultObj.put("listenPort", listenPort)
@@ -394,6 +408,7 @@ class AutoScannerActivity : Activity() {
             if (!resultObj.has("clue")) {
                 deriveProfileClue(profile, directNetwork, runtimeSnapshot)?.let { resultObj.put("clue", it) }
             }
+            attachFailureLogs(resultObj)
 
             scanResultsArray.put(resultObj)
             PacketBridge.stopClient()
@@ -482,6 +497,15 @@ class AutoScannerActivity : Activity() {
                 )
             }
 
+            TunnelTransportMode.OBFS -> {
+                checks += probeDirectTcp(
+                    label = "obfs-tcp",
+                    target = "${endpoint.host}:${endpoint.port}",
+                    connectHost = endpoint.host,
+                    connectPort = endpoint.port,
+                )
+            }
+
             TunnelTransportMode.AUTO -> {
                 checks += runHttpNetworkChecks(
                     endpoint = endpoint,
@@ -505,6 +529,41 @@ class AutoScannerActivity : Activity() {
             clue = buildUserNetworkClue(profile, checks),
             anySucceeded = checks.any { it.connectSucceeded || it.appResponseReceived },
         )
+    }
+
+    private fun probeDirectTcp(
+        label: String,
+        target: String,
+        connectHost: String,
+        connectPort: Int,
+    ): DirectNetworkCheck {
+        val startedAt = System.currentTimeMillis()
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(connectHost, connectPort), 4_000)
+            }
+            DirectNetworkCheck(
+                label = label,
+                target = target,
+                connectSucceeded = true,
+                appResponseReceived = false,
+                statusLine = null,
+                responsePreview = null,
+                error = null,
+                durationMs = System.currentTimeMillis() - startedAt,
+            )
+        } catch (e: Exception) {
+            DirectNetworkCheck(
+                label = label,
+                target = target,
+                connectSucceeded = false,
+                appResponseReceived = false,
+                statusLine = null,
+                responsePreview = null,
+                error = e.localizedMessage ?: e.javaClass.simpleName,
+                durationMs = System.currentTimeMillis() - startedAt,
+            )
+        }
     }
 
     private fun runHttpNetworkChecks(
@@ -860,6 +919,7 @@ class AutoScannerActivity : Activity() {
             TunnelTransportMode.HTTP -> 40_000L
             TunnelTransportMode.WEBSOCKET -> 18_000L
             TunnelTransportMode.STEALTH -> 40_000L
+            TunnelTransportMode.OBFS -> 40_000L
             TunnelTransportMode.AUTO -> 25_000L
         }
         val startedAt = System.currentTimeMillis()
@@ -1113,10 +1173,18 @@ class AutoScannerActivity : Activity() {
     }
 
     private fun appendLog(msg: String) {
+        val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+        val formattedLine = "[$stamp] $msg"
+        synchronized(scannerLogLock) {
+            scannerLogLines.add(formattedLine)
+            if (scannerLogLines.size > MAX_SCANNER_LOG_LINES) {
+                scannerLogLines.subList(0, scannerLogLines.size - MAX_SCANNER_LOG_LINES).clear()
+            }
+        }
+        TunnelLogStore.append(this, "[SCAN] $msg")
         uiHandler.post {
-            val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
             val current = resultLogText.text.toString()
-            resultLogText.text = "$current\n[$stamp] $msg"
+            resultLogText.text = "$current\n$formattedLine"
             resultScrollView.post { resultScrollView.fullScroll(ScrollView.FOCUS_DOWN) }
         }
     }
@@ -1143,6 +1211,27 @@ class AutoScannerActivity : Activity() {
         startActivity(Intent.createChooser(shareIntent, "Share JSON Report"))
     }
 
+    private fun attachFailureLogs(resultObj: JSONObject) {
+        if (resultObj.optString("status") == "success") {
+            return
+        }
+
+        resultObj.put("scannerLogTail", recentScannerLogTail())
+        resultObj.put("appLogTail", recentAppLogTail())
+        resultObj.put("runtimeStatsJson", PacketBridge.copyStatsJson() ?: "{}")
+    }
+
+    private fun recentScannerLogTail(limit: Int = 80): JSONArray {
+        val lines = synchronized(scannerLogLock) {
+            scannerLogLines.takeLast(limit)
+        }
+        return lines.toJsonStringArray()
+    }
+
+    private fun recentAppLogTail(limit: Int = 80): JSONArray {
+        return TunnelLogStore.load(this).takeLast(limit).toJsonStringArray()
+    }
+
     data class TestProfile(
         val name: String,
         val cdnEdge: String,
@@ -1150,7 +1239,8 @@ class AutoScannerActivity : Activity() {
         val sniOverride: String,
         val transportMode: TunnelTransportMode,
         val fragmentEnabled: Boolean = false,
-        val fragmentSizeValue: Int = 40
+        val fragmentSizeValue: Int = 40,
+        val obfsKey: String = "",
     ) {
         fun networkCacheKey(): String {
             return listOf(
@@ -1158,6 +1248,7 @@ class AutoScannerActivity : Activity() {
                 cdnEdge,
                 hostOverride,
                 sniOverride,
+                obfsKey,
             ).joinToString("|")
         }
     }
@@ -1270,5 +1361,15 @@ class AutoScannerActivity : Activity() {
             )
         }
         return array
+    }
+
+    private fun List<String>.toJsonStringArray(): JSONArray {
+        val array = JSONArray()
+        forEach { line -> array.put(line) }
+        return array
+    }
+
+    private companion object {
+        const val MAX_SCANNER_LOG_LINES = 500
     }
 }

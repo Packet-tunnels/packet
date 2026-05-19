@@ -12,7 +12,7 @@
         android:icon="@drawable/ic_launcher"
         android:roundIcon="@drawable/ic_launcher"
         android:label="Packet"
-        android:supportsRtl="true"
+        android:supportsRtl="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
         <activity
@@ -27,6 +27,15 @@
 
         <activity android:name=".AutoScannerActivity" android:exported="false" />
         <activity android:name=".SettingsActivity" android:exported="false" />
+        <activity
+            android:name=".DiagnosticActivity"
+            android:exported="true"
+            android:label="Packet Diagnostic">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
 
         <service
             android:name=".TunnelVpnService"

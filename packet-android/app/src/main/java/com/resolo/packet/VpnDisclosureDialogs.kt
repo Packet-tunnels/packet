@@ -17,7 +17,7 @@ object VpnDisclosureDialogs {
         onAccept: () -> Unit,
         onDismiss: (() -> Unit)? = null,
     ) {
-        AlertDialog.Builder(activity)
+        val dialog = AlertDialog.Builder(activity)
             .setTitle(DISCLOSURE_TITLE)
             .setMessage(DISCLOSURE_MESSAGE)
             .setPositiveButton(acceptTitle) { dialog, _ ->
@@ -30,5 +30,6 @@ object VpnDisclosureDialogs {
                 onDismiss?.invoke()
             }
             .show()
+        dialog.forceLeftToRightLayout()
     }
 }

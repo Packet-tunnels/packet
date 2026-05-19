@@ -12,13 +12,18 @@
 
 #[cfg(target_os = "android")]
 pub(crate) mod android_tun;
+pub(crate) mod decoy;
+pub mod diagnostic;
 pub mod ffi;
 pub(crate) mod heuristics;
+pub(crate) mod lane_profile;
 pub(crate) mod mesh;
+pub(crate) mod multi_lane;
 pub(crate) mod peer_discovery;
 pub(crate) mod relay_forwarder;
 pub(crate) mod tls_fragment;
 pub(crate) mod transport;
+pub mod trojan_carrier;
 pub(crate) mod trust;
 
 use lazy_static::lazy_static;
@@ -71,6 +76,25 @@ pub struct ClientConfig {
     pub mesh_bootstrap: Option<MeshBootstrapConfig>,
     /// TLS and HTTP profile used by advanced bypass transports.
     pub tls_profile: TlsProfile,
+    /// Run N parallel transport lanes with fingerprint diversity instead of
+    /// a single tunnel. Each lane has a different SNI/ALPN/fragmentation
+    /// profile so the DPI can't collapse them into one blockable flow.
+    /// 0 or 1 = legacy single-tunnel behaviour.
+    pub multi_lane_count: usize,
+    /// When `multi_lane_count >= 2`, lock every lane to the operator-supplied
+    /// SNI instead of rotating through fronting candidates. Set this true
+    /// when the CDN requires exact-match SNI for routing.
+    pub multi_lane_pin_sni: bool,
+    /// Generate background cover traffic to popular Iranian sites alongside
+    /// the tunnel. Makes the device look like a normal user browsing rather
+    /// than a pure tunneling appliance.
+    pub decoy_traffic: bool,
+    /// How many concurrent decoy workers to run. More = denser cover, more
+    /// battery / bandwidth.
+    pub decoy_workers: usize,
+    /// Pre-shared obfuscation "knock" for `TransportMode::Obfs`. Must match
+    /// the server's `--obfs-key`. None falls back to the default knock.
+    pub obfs_key: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -83,12 +107,17 @@ impl Default for ClientConfig {
             transport: TransportMode::Auto,
             cdn_edge: None,
             host_override: None,
-            fragment: false,
+            fragment: true,
             fragment_size: 40,
             padding: true,
             sni_override: None,
             mesh_bootstrap: None,
             tls_profile: TlsProfile::Default,
+            multi_lane_count: 5,
+            multi_lane_pin_sni: false,
+            decoy_traffic: true,
+            decoy_workers: 2,
+            obfs_key: None,
         }
     }
 }
@@ -123,6 +152,7 @@ fn runtime_transport_label(mode: &TransportMode) -> &'static str {
         TransportMode::WebSocket => "WebSocket",
         TransportMode::Auto => "Auto",
         TransportMode::Stealth => "Stealth",
+        TransportMode::Obfs => "Obfs",
     }
 }
 
@@ -167,6 +197,30 @@ pub fn reset_runtime_stats(config: &ClientConfig) {
             server_host: runtime_server_host(&config.server_url),
             cdn_edge: config.cdn_edge.clone(),
             listen_port: runtime_listen_port(&config.listen),
+            bytes_up: 0,
+            bytes_down: 0,
+            active_streams: 0,
+            total_streams: 0,
+            connected_since: None,
+            last_ping_ms: None,
+            last_error: None,
+            tunnel_active: false,
+        };
+    }
+}
+
+pub fn reset_carrier_runtime_stats(
+    server_host: impl Into<String>,
+    cdn_edge: Option<String>,
+    listen_port: u16,
+) {
+    if let Ok(mut snapshot) = RUNTIME_STATS.lock() {
+        *snapshot = RuntimeStatsSnapshot {
+            state: "starting".to_string(),
+            transport: "DirectSock".to_string(),
+            server_host: server_host.into(),
+            cdn_edge,
+            listen_port: Some(listen_port),
             bytes_up: 0,
             bytes_down: 0,
             active_streams: 0,
@@ -366,8 +420,7 @@ pub async fn start_client_with_listener(
     }
     if config.fragment {
         info!(
-            "[PHANTOM] TLS fragment: ON ({}B chunks)",
-            config.fragment_size
+            "[PHANTOM] TLS fragment: ON (v2rayNG tlshello preset, 100-150B chunks, 10-20ms delays, 5 segments)"
         );
     }
     info!("[PHANTOM] ═══════════════════════════════════════");
@@ -409,15 +462,56 @@ pub async fn start_client_with_listener(
         } else {
             config.tls_profile.clone()
         },
+        alpn_override: None,
+        user_agent_override: None,
+        obfs_key: config.obfs_key.clone(),
     };
 
-    // Spawn the transport loop (WebSocket, HTTP, or Auto)
-    // NOTE: Transport starts AFTER SOCKS5 is confirmed bound.
-    info!("[PHANTOM] Launching transport...");
+    // Spawn the transport loop. If multi_lane_count >= 2 we run the bonded
+    // orchestrator which fans traffic across N parallel transports with
+    // fingerprint diversity (the stacked-tunnel pattern, replicated
+    // in-process). Otherwise we keep the legacy single-tunnel path.
     let transport_state = tunnel_state.clone();
-    tokio::spawn(async move {
-        transport::run_transport(transport_config, upstream_rx, transport_state).await;
-    });
+    if config.multi_lane_count >= 2 {
+        let lane_cfg = multi_lane::MultiLaneConfig {
+            num_lanes: config.multi_lane_count,
+            pin_sni: config.multi_lane_pin_sni,
+        };
+        info!(
+            "[PHANTOM] Launching bonded multi-lane transport: {} lanes, pin_sni={}",
+            lane_cfg.num_lanes, lane_cfg.pin_sni
+        );
+        tokio::spawn(async move {
+            multi_lane::run_multi_lane(transport_config, lane_cfg, upstream_rx, transport_state)
+                .await;
+        });
+    } else {
+        info!("[PHANTOM] Launching single-tunnel transport...");
+        tokio::spawn(async move {
+            transport::run_transport(transport_config, upstream_rx, transport_state).await;
+        });
+    }
+
+    // Decoy cover traffic: real TLS visits to popular Iranian sites alongside
+    // the tunnel, so the device looks like a normal user browsing instead of
+    // a pure tunneling appliance.
+    if config.decoy_traffic {
+        let decoy_cfg = decoy::DecoyConfig {
+            enabled: true,
+            workers: config.decoy_workers.max(1),
+            ..Default::default()
+        };
+        info!(
+            "[PHANTOM] Decoy cover traffic: ON ({} workers, 20-75s intervals)",
+            decoy_cfg.workers
+        );
+        // Reuse the existing shutdown channel for the decoy loop so it stops
+        // when the client stops. `start_client_with_config` plumbs its own
+        // shutdown receiver in; here we tee off the same one.
+        decoy::spawn_decoy_loop(decoy_cfg, shutdown_rx.clone());
+    } else {
+        info!("[PHANTOM] Decoy cover traffic: OFF");
+    }
 
     // Accept SOCKS5 connections
     let next_stream_id = Arc::new(std::sync::atomic::AtomicU32::new(1));

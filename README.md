@@ -35,6 +35,9 @@ packet/
 ## Build
 
 ```bash
+# Debian/Ubuntu VPS prerequisites
+sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev git
+
 # Server (on VPS)
 cargo build --release -p phantom-server
 

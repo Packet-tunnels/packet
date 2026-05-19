@@ -5,70 +5,135 @@
 // TLS ClientHello message. If the SNI matches a blocked domain,
 // the connection is terminated via TCP RST injection.
 //
-// This module implements TCP-level fragmentation that splits
-// the first write (ClientHello) across multiple TCP segments,
-// preventing DPI from extracting the SNI in a single pass.
+// This implementation matches the v2rayNG/sing-box "tlshello" fragment
+// pattern proven to bypass Iran's DPI on residential connections:
+//   - random chunk sizes in `len_range` (default 100-150 bytes)
+//   - random inter-chunk delays in `delay_ms_range` (default 10-20 ms)
+//   - fragments only the first `fragment_writes` writes (covers the
+//     full TLS ClientHello), then passes everything through
 //
-// Technique (same as GoodbyeDPI):
-// 1. Disable Nagle's algorithm (TCP_NODELAY) for precise segment control
-// 2. On the first write (ClientHello), only send `fragment_size` bytes
-// 3. The TLS library sees a partial write and retries with remaining data
-// 4. Each partial write becomes a separate TCP segment
-// 5. DPI only inspects the first segment — SNI is in a later segment
-//
-// Typical fragment_size: 40 bytes (SNI field starts around byte 40-60)
+// Fixed-size or low-count fragmentation has been fingerprinted by Iran's
+// DPI; randomization and multi-segment splitting defeats the pattern
+// matcher.
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
+
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::time::Sleep;
 
-/// Fragment state machine for the first two writes.
+/// Tunables for the fragment stream. Defaults match the v2rayNG/Hiddify
+/// preset that is currently working on Iranian residential ISPs.
+#[derive(Clone, Debug)]
+pub struct FragmentConfig {
+    /// Inclusive range of bytes per fragmented write.
+    pub len_range: (usize, usize),
+    /// Inclusive range of milliseconds to sleep between fragments.
+    pub delay_ms_range: (u64, u64),
+    /// Number of initial writes to fragment. The TLS ClientHello fits
+    /// in 1–2 writes from rustls; using 3–5 covers the case where the
+    /// client sends additional handshake records (cipher change spec,
+    /// finished) immediately after.
+    pub fragment_writes: usize,
+}
+
+impl Default for FragmentConfig {
+    fn default() -> Self {
+        // v2rayNG defaults that are currently bypassing Iran DPI for
+        // residential users with the "tlshello" preset.
+        Self {
+            len_range: (100, 150),
+            delay_ms_range: (10, 20),
+            fragment_writes: 5,
+        }
+    }
+}
+
 enum FragState {
-    /// First write: send only `fragment_size` bytes
-    First,
-    /// Second write: send another small chunk to further split
-    Second,
-    /// All subsequent writes: pass through directly
+    /// `writes_remaining` initial writes still get fragmented.
+    Active { writes_remaining: usize },
+    /// All subsequent writes pass through directly.
     Done,
 }
 
-/// A TCP stream wrapper that fragments the first write operations.
-///
-/// When the TLS library writes the ClientHello (typically 200-600 bytes),
-/// this wrapper returns a "short write" of only `fragment_size` bytes.
-/// The TLS library then retries with the remaining bytes, which go as
-/// a separate TCP segment. This splits the SNI across packets.
-///
-/// For non-TLS (plain HTTP) connections, this also works to split
-/// the HTTP request across segments, preventing Host header extraction.
 pub struct FragmentStream {
     inner: TcpStream,
     state: FragState,
-    fragment_size: usize,
+    cfg: FragmentConfig,
+    rng: SmallRng,
+    pending_sleep: Option<Pin<Box<Sleep>>>,
 }
 
 impl FragmentStream {
-    /// Create a new FragmentStream.
-    ///
-    /// `fragment_size`: bytes to send in the first TCP segment.
-    /// Recommended: 40 for TLS (before SNI), 20 for HTTP (before Host).
-    pub fn new(stream: TcpStream, fragment_size: usize) -> Self {
-        // Disable Nagle's algorithm so each write() becomes a separate segment
+    /// New fragmenting wrapper using the supplied config.
+    pub fn with_config(stream: TcpStream, cfg: FragmentConfig) -> Self {
+        // Nagle off so each write produces a discrete TCP segment.
         let _ = stream.set_nodelay(true);
+        let fragment_writes = cfg.fragment_writes.max(1);
         Self {
             inner: stream,
-            state: FragState::First,
-            fragment_size: fragment_size.max(10), // minimum 10 bytes
+            state: FragState::Active {
+                writes_remaining: fragment_writes,
+            },
+            cfg,
+            rng: SmallRng::from_entropy(),
+            pending_sleep: None,
         }
     }
 
-    /// Create a pass-through wrapper (no fragmentation).
+    /// Backward-compatible constructor.
+    ///
+    /// Legacy callers passed a single fixed `fragment_size`. We map that
+    /// to a tight range centred on that size so existing CLIs keep
+    /// working, but the modern path is `with_config` + the default
+    /// v2rayNG-style randomised settings.
+    pub fn new(stream: TcpStream, fragment_size: usize) -> Self {
+        let size = fragment_size.max(10);
+        let cfg = FragmentConfig {
+            len_range: (size, size),
+            delay_ms_range: (0, 0),
+            fragment_writes: 2,
+        };
+        Self::with_config(stream, cfg)
+    }
+
+    /// No-op wrapper (no fragmentation).
     pub fn passthrough(stream: TcpStream) -> Self {
         Self {
             inner: stream,
             state: FragState::Done,
-            fragment_size: 0,
+            cfg: FragmentConfig::default(),
+            rng: SmallRng::from_entropy(),
+            pending_sleep: None,
+        }
+    }
+
+    fn pick_len(&mut self, max: usize) -> usize {
+        let (lo, hi) = self.cfg.len_range;
+        let lo = lo.max(1);
+        let hi = hi.max(lo);
+        let pick = if lo == hi {
+            lo
+        } else {
+            self.rng.gen_range(lo..=hi)
+        };
+        pick.min(max).max(1)
+    }
+
+    fn pick_delay_ms(&mut self) -> u64 {
+        let (lo, hi) = self.cfg.delay_ms_range;
+        if hi == 0 {
+            return 0;
+        }
+        let hi = hi.max(lo);
+        if lo == hi {
+            lo
+        } else {
+            self.rng.gen_range(lo..=hi)
         }
     }
 }
@@ -81,36 +146,50 @@ impl AsyncWrite for FragmentStream {
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
 
-        match this.state {
-            FragState::First => {
-                if buf.len() > this.fragment_size {
-                    // Only write fragment_size bytes — creates first TCP segment
-                    let fragment = &buf[..this.fragment_size];
-                    let result = Pin::new(&mut this.inner).poll_write(cx, fragment);
-                    if let Poll::Ready(Ok(_)) = &result {
-                        this.state = FragState::Second;
-                    }
-                    result
-                } else {
-                    // Buffer smaller than fragment — send as-is, move to next state
-                    this.state = FragState::Second;
-                    Pin::new(&mut this.inner).poll_write(cx, buf)
+        // 1) If we owe a delay from the previous write, finish it first.
+        if let Some(sleep) = this.pending_sleep.as_mut() {
+            match sleep.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => {
+                    this.pending_sleep = None;
                 }
-            }
-            FragState::Second => {
-                // Second fragment: send another small chunk for extra splitting
-                let chunk_size = this.fragment_size.min(buf.len());
-                let result = Pin::new(&mut this.inner).poll_write(cx, &buf[..chunk_size]);
-                if let Poll::Ready(Ok(_)) = &result {
-                    this.state = FragState::Done;
-                }
-                result
-            }
-            FragState::Done => {
-                // Normal pass-through for all subsequent writes
-                Pin::new(&mut this.inner).poll_write(cx, buf)
             }
         }
+
+        // 2) If fragmentation is done, just pass through.
+        let writes_remaining = match this.state {
+            FragState::Active { writes_remaining } => writes_remaining,
+            FragState::Done => {
+                return Pin::new(&mut this.inner).poll_write(cx, buf);
+            }
+        };
+
+        // 3) Write a randomly-sized chunk of this buffer.
+        let chunk_len = this.pick_len(buf.len());
+        let result = Pin::new(&mut this.inner).poll_write(cx, &buf[..chunk_len]);
+
+        if let Poll::Ready(Ok(n)) = &result {
+            let still_to_fragment = writes_remaining.saturating_sub(1);
+            this.state = if still_to_fragment == 0 {
+                FragState::Done
+            } else {
+                FragState::Active {
+                    writes_remaining: still_to_fragment,
+                }
+            };
+
+            // Arm a delay before the next write if more fragmentation
+            // is scheduled and we actually emitted bytes.
+            if still_to_fragment > 0 && *n > 0 {
+                let ms = this.pick_delay_ms();
+                if ms > 0 {
+                    this.pending_sleep =
+                        Some(Box::pin(tokio::time::sleep(Duration::from_millis(ms))));
+                }
+            }
+        }
+
+        result
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

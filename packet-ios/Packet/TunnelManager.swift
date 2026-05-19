@@ -10,6 +10,14 @@ struct TunnelTelemetry: Equatable {
     static let empty = TunnelTelemetry()
 
     var countryLabel: String {
+        if let name = snapshot.serverCountryName?.nilIfEmpty {
+            return name
+        }
+
+        if let code = snapshot.serverCountryCode?.nilIfEmpty {
+            return Locale.current.localizedString(forRegionCode: code.uppercased()) ?? code.uppercased()
+        }
+
         let hostParts = snapshot.serverHost.lowercased().split(separator: ".")
         guard let tld = hostParts.last, tld.count == 2 else {
             return "Unknown"
@@ -378,6 +386,15 @@ final class TunnelManager: ObservableObject {
             uploadRateBps: uploadRate,
             downloadRateBps: downloadRate
         )
+
+        let vpnStatus = providerManager?.connection.status
+        if snapshot.tunnelActive {
+            state = .running
+            lastResult = "Tunnel connected"
+        } else if vpnStatus == .connected || vpnStatus == .connecting || vpnStatus == .reasserting {
+            state = .launching
+            lastResult = snapshot.lastError?.nilIfEmpty ?? "Tunnel is verifying internet access"
+        }
     }
 
     private func resetTelemetryForNewSession() {
@@ -396,20 +413,13 @@ final class TunnelManager: ObservableObject {
     }
 
     private func validate(_ configuration: TunnelConfiguration) throws {
-        guard !configuration.normalizedServerURL.isEmpty else {
-            throw TunnelManagerError.invalidConfiguration("Server URL is required.")
-        }
-
-        guard !configuration.normalizedSecret.isEmpty else {
-            throw TunnelManagerError.invalidConfiguration("Shared secret is required.")
-        }
-
-        if let cdnEdgeValidationError = configuration.cdnEdgeValidationError {
-            throw TunnelManagerError.invalidConfiguration(cdnEdgeValidationError)
+        if let validationError = configuration.validationError {
+            throw TunnelManagerError.invalidConfiguration(validationError)
         }
 
         let trimmedPort = configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedPort.isEmpty,
+        if !configuration.usesCustomCarrier,
+            !trimmedPort.isEmpty,
             trimmedPort.lowercased() != "auto",
             configuration.listenPortValue == nil
         {
@@ -561,16 +571,23 @@ final class TunnelManager: ObservableObject {
     private func apply(_ status: NEVPNStatus) {
         switch status {
         case .connected:
-            state = .running
-            lastResult = "Tunnel connected"
+            if telemetry.snapshot.tunnelActive {
+                state = .running
+                lastResult = "Tunnel connected"
+                return
+            }
+
+            state = .launching
+            lastResult = "Tunnel is verifying internet access"
 
             var snapshot = telemetry.snapshot
-            snapshot.state = "connected"
-            snapshot.tunnelActive = true
+            snapshot.state = snapshot.state.nilIfEmpty ?? "verifying"
+            snapshot.tunnelActive = false
+            snapshot.connectedSince = nil
             telemetry = TunnelTelemetry(
                 snapshot: snapshot,
-                uploadRateBps: telemetry.uploadRateBps,
-                downloadRateBps: telemetry.downloadRateBps
+                uploadRateBps: 0,
+                downloadRateBps: 0
             )
         case .connecting, .reasserting:
             state = .launching

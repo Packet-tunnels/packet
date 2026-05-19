@@ -42,15 +42,17 @@ struct Cli {
     #[arg(long)]
     sni: Option<String>,
 
-    /// Enable TLS ClientHello fragmentation.
-    /// Splits the TLS handshake across multiple TCP segments to prevent
-    /// DPI from reading the SNI field. Only useful for HTTPS connections.
+    /// Disable TLS ClientHello fragmentation.
+    /// Fragmentation is ON by default (v2rayNG `tlshello` preset: 5 writes
+    /// of 100-150 bytes each, 10-20 ms apart). Pass --no-fragment to turn
+    /// it off when connecting to non-DPI'd endpoints for diagnostics.
     #[arg(long)]
-    fragment: bool,
+    no_fragment: bool,
 
-    /// Fragment chunk size in bytes (default: 40).
-    /// The SNI field typically starts at byte 40-60 in the ClientHello.
-    #[arg(long, default_value = "40")]
+    /// Hint for the lower bound of the fragment chunk size range (bytes).
+    /// Default 0 → use the v2rayNG-style [100, 150] range as-is. Values
+    /// inside [100, 150) shift the low edge up; other values are ignored.
+    #[arg(long, default_value = "0")]
     fragment_size: usize,
 
     /// TLS profile: default or browser-like.
@@ -67,6 +69,38 @@ struct Cli {
     /// DPI from fingerprinting the tunnel by message size patterns.
     #[arg(long)]
     no_padding: bool,
+
+    /// Number of parallel transport lanes. Each lane is an independent
+    /// WS+TLS tunnel with its own SNI/ALPN/fragmentation fingerprint.
+    /// Default 5 replicates stacked-tunnel parallelism.
+    /// effect that bypasses Iran's per-flow DPI. Set to 1 to disable.
+    #[arg(long, default_value = "5")]
+    lanes: usize,
+
+    /// Pin every lane's SNI to the operator-supplied --sni. By default lanes
+    /// 1..N rotate through plausible fronting SNIs (cdnjs, fonts.gstatic,
+    /// discord etc) for fingerprint diversity. Use this when your CDN
+    /// requires exact-match SNI for routing.
+    #[arg(long)]
+    pin_sni: bool,
+
+    /// Disable decoy cover traffic. By default the client periodically
+    /// opens real TLS connections to popular Iranian sites (Aparat,
+    /// Digikala, Snapp, Blu, Divar...) so the device looks like a normal
+    /// user browsing instead of a pure tunneling appliance.
+    #[arg(long)]
+    no_decoy: bool,
+
+    /// Number of concurrent decoy workers when decoy traffic is on.
+    #[arg(long, default_value = "2")]
+    decoy_workers: usize,
+
+    /// Pre-shared obfuscation "knock" for --transport obfs. Must match the
+    /// server's --obfs-key. Low-entropy is fine — confidentiality is the
+    /// inner frame crypto. With obfs, pass the directly-reachable foreign
+    /// IP:port via --cdn-edge (NOT a TLS-terminating CDN).
+    #[arg(long, env = "PHANTOM_OBFS_KEY")]
+    obfs_key: Option<String>,
 }
 
 fn parse_transport(s: &str) -> phantom_client::TransportMode {
@@ -76,6 +110,7 @@ fn parse_transport(s: &str) -> phantom_client::TransportMode {
         "stealth" | "browser" | "browser-like" | "browser_like" => {
             phantom_client::TransportMode::Stealth
         }
+        "obfs" | "ossh" | "raw" => phantom_client::TransportMode::Obfs,
         _ => phantom_client::TransportMode::Auto,
     }
 }
@@ -113,11 +148,16 @@ async fn main() {
         transport,
         cdn_edge: cli.cdn_edge,
         host_override: cli.host,
-        fragment: cli.fragment,
+        fragment: !cli.no_fragment,
         fragment_size: cli.fragment_size,
         padding: !cli.no_padding,
         sni_override: cli.sni,
         tls_profile,
+        multi_lane_count: cli.lanes,
+        multi_lane_pin_sni: cli.pin_sni,
+        decoy_traffic: !cli.no_decoy,
+        decoy_workers: cli.decoy_workers,
+        obfs_key: cli.obfs_key,
         ..Default::default()
     };
 
