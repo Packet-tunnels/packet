@@ -579,7 +579,7 @@ class TunnelVpnService : VpnService() {
             val upstreamProxy = "http://127.0.0.1:$carrierPort"
             TunnelLogStore.append(
                 this,
-                "[CHAIN] DirectSock carrier is listening on 127.0.0.1:$carrierPort; starting Packet Meek HTTP through it",
+                "[CHAIN] DirectSock carrier is listening on 127.0.0.1:$carrierPort; starting Packet ${configuration.transportMode.title} through it",
             )
 
             return PacketBridge.startClientFull(

@@ -1385,7 +1385,7 @@ class MainActivity : Activity() {
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
         editorDirectSockSection.visibility = if (isDirectSock || isPacketChain) View.VISIBLE else View.GONE
         editorTransportRow.text = when {
-            isPacketChain -> "Transport      Meek HTTP through DirectSock"
+            isPacketChain -> "Transport      Auto through DirectSock"
             isPrivateRelay -> "Transport      Private WebSocket relay"
             else -> "Transport      ${displayTransportMode(editorTransportMode)}"
         }
