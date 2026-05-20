@@ -15,6 +15,11 @@ object TunnelActions {
 
 enum class TunnelTransportMode(val rawValue: Int, val title: String) {
     AUTO(0, "Auto"),
+    // QUIC over UDP — the escape transport that survives Iran's "RST every
+    // foreign TLS over TCP" filter, because UDP/443 has to stay open for
+    // WhatsApp / Meet / Telegram video calls. Auto-included in the rotation
+    // pool when the active mode is AUTO.
+    QUIC(6, "QUIC"),
     WEBSOCKET(1, "WebSocket"),
     HTTP(2, "HTTP"),
     STEALTH(3, "Stealth"),
@@ -55,10 +60,10 @@ enum class TunnelState(val title: String) {
 
 object PacketDefaultProfiles {
     const val CHAIN_NAME = "Packet Chain"
-    const val CHAIN_SERVER_URL = "http://103.241.67.247:80"
-    const val CHAIN_SECRET = "4f7125a9a35d2e0f0ef74ef5df990856d573b20f0cdbae3bd5e987bf254a3303"
-    const val CHAIN_EDGE = "103.241.67.247:80"
-    const val CHAIN_OBFS_KEY = ""
+    const val CHAIN_SERVER_URL = "http://185.127.19.211:80"
+    const val CHAIN_SECRET = "653925d13cce7b0fdf95ed34321b117947798b95bfedf91890168f2412e44b31"
+    const val CHAIN_EDGE = "185.127.19.211:80"
+    const val CHAIN_OBFS_KEY = "23cdd676a062e1174719a80975f34eda1e5c7f97a7ef8b5760b40055cc9f1519"
     const val CHAIN_TROJAN_URI =
         "trojan://humanity@172.64.152.23:443?path=%2Fassignment&security=tls" +
             "&host=www.creationlong.org&type=ws&sni=www.creationlong.org&fp=chrome#%40InfoTech_VK"
@@ -72,7 +77,11 @@ object PacketDefaultProfiles {
             cdnEdge = CHAIN_EDGE,
             hostOverride = "",
             sniOverride = "",
-            transportMode = TunnelTransportMode.MEEK,
+            // AUTO triggers the candidate-rotation supervisor on the Rust
+            // side, which sweeps WS+ChromeTLS / Obfs / QUIC across every
+            // port we know about — what actually escapes Iran 2026 instead
+            // of being a single Meek HTTP polling shape that gets RST'd.
+            transportMode = TunnelTransportMode.AUTO,
             obfsKey = CHAIN_OBFS_KEY,
             upstreamProxy = "",
             fragmentEnabled = true,

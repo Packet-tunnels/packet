@@ -23,6 +23,9 @@ use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::obfs::{self, ObfsStream};
 use phantom_proto::*;
+
+// QUIC (UDP) tunnel listener — see module docstring.
+mod quic_listener;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -65,6 +68,15 @@ struct Cli {
     /// the client's --obfs-key. Required only if --obfs-port is set.
     #[arg(long, env = "PHANTOM_OBFS_KEY", default_value = "phantom-obfs")]
     obfs_key: String,
+
+    /// Optional QUIC tunnel listener on UDP/<port> (default 443). The
+    /// escape transport for networks that RST every foreign TLS-on-TCP but
+    /// pass UDP/443 because of WhatsApp / Meet / Telegram video calls. A
+    /// self-signed cert is generated at startup; clients use a permissive
+    /// verifier (TLS here is camouflage, the phantom protocol auths
+    /// itself).
+    #[arg(long, env = "PHANTOM_QUIC_PORT")]
+    quic_port: Option<u16>,
 }
 
 // ─── Server State ──────────────────────────────────────────────
@@ -272,6 +284,17 @@ async fn main() {
         .with_state(state.clone());
 
     // Optional raw-TCP obfuscated tunnel listener (Iran escape transport).
+    if let Some(quic_port) = cli.quic_port {
+        let quic_state = state.clone();
+        tokio::spawn(async move {
+            quic_listener::run_quic_listener(quic_port, quic_state).await;
+        });
+        info!(
+            "[PHANTOM] QUIC (UDP) tunnel listener ENABLED on port {}",
+            quic_port
+        );
+    }
+
     if let Some(obfs_port) = cli.obfs_port {
         let obfs_state = state.clone();
         let obfs_key = cli.obfs_key.clone().into_bytes();

@@ -11,8 +11,8 @@
 #   3. Builds packet-server in release mode.
 #   4. Installs a systemd unit (`phantom-server.service`) that restarts on
 #      failure → that's the "alive mode" you asked for; no nginx needed.
-#   5. Starts the service on port 80 (HTTP/WS, dual-stack v4/v6 from main.rs)
-#      and 8443 (OBFS).
+#   5. Starts the service on port 80 (HTTP/WS/Meek, dual-stack v4/v6),
+#      8443 (OBFS TCP), and 443 (QUIC UDP).
 #   6. Prints the secrets and the snippet you need to paste into
 #      packet-android/.../TunnelModels.kt on your laptop.
 #
@@ -29,6 +29,7 @@ fi
 REPO_DIR="${REPO_DIR:-$(pwd)}"
 WS_PORT="${WS_PORT:-80}"
 OBFS_PORT="${OBFS_PORT:-8443}"
+QUIC_PORT="${QUIC_PORT:-443}"
 SECRETS_FILE="/root/packet-secrets.env"
 
 if [[ ! -f "$REPO_DIR/Cargo.toml" ]] || [[ ! -d "$REPO_DIR/packet-server" ]]; then
@@ -40,7 +41,7 @@ fi
 echo "═══════════════════════════════════════════════════════════"
 echo "  phantom-server VPS setup"
 echo "  Repo  : $REPO_DIR"
-echo "  Ports : WS=$WS_PORT  OBFS=$OBFS_PORT"
+echo "  Ports : WS/Meek=$WS_PORT  OBFS-TCP=$OBFS_PORT  QUIC-UDP=$QUIC_PORT"
 echo "═══════════════════════════════════════════════════════════"
 
 # ── 1. Secrets (preserve if already deployed) ─────────────────────
@@ -60,8 +61,14 @@ PHANTOM_SECRET=$PHANTOM_SECRET
 OBFS_KEY=$OBFS_KEY
 WS_PORT=$WS_PORT
 OBFS_PORT=$OBFS_PORT
+QUIC_PORT=$QUIC_PORT
 EOF
   echo "       → saved to $SECRETS_FILE (mode 600)"
+fi
+
+# Backfill new vars when reusing an older secrets file.
+if ! grep -q '^QUIC_PORT=' "$SECRETS_FILE"; then
+  echo "QUIC_PORT=$QUIC_PORT" >> "$SECRETS_FILE"
 fi
 
 # ── 2. Build deps + Rust ──────────────────────────────────────────
@@ -89,7 +96,7 @@ echo "       installed to /usr/local/bin/phantom-server"
 echo "[4/5] Installing systemd unit (Restart=always) …"
 cat > /etc/systemd/system/phantom-server.service <<UNIT
 [Unit]
-Description=Packet phantom-server (dual-stack v4/v6, WS + OBFS)
+Description=Packet phantom-server (dual-stack v4/v6, WS + Meek + OBFS + QUIC)
 After=network-online.target
 Wants=network-online.target
 
@@ -98,7 +105,7 @@ Type=simple
 User=root
 EnvironmentFile=$SECRETS_FILE
 Environment=RUST_LOG=info
-ExecStart=/usr/local/bin/phantom-server --port \${WS_PORT} --secret \${PHANTOM_SECRET} --obfs-port \${OBFS_PORT} --obfs-key \${OBFS_KEY}
+ExecStart=/usr/local/bin/phantom-server --port \${WS_PORT} --secret \${PHANTOM_SECRET} --obfs-port \${OBFS_PORT} --obfs-key \${OBFS_KEY} --quic-port \${QUIC_PORT}
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
@@ -117,6 +124,7 @@ systemctl enable phantom-server >/dev/null 2>&1 || true
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
   ufw allow "$WS_PORT/tcp"   || true
   ufw allow "$OBFS_PORT/tcp" || true
+  ufw allow "$QUIC_PORT/udp" || true
 fi
 
 # ── 5. Start + report ─────────────────────────────────────────────
@@ -134,8 +142,9 @@ echo "  ✓ phantom-server is alive (systemd Restart=always)"
 echo "═══════════════════════════════════════════════════════════"
 echo "  Public IPv4 : ${PUBLIC_IP4}"
 [[ -n "$PUBLIC_IP6" ]] && echo "  Public IPv6 : ${PUBLIC_IP6}"
-echo "  WS port     : $WS_PORT"
-echo "  OBFS port   : $OBFS_PORT"
+echo "  WS/Meek port: $WS_PORT/tcp"
+echo "  OBFS port   : $OBFS_PORT/tcp"
+echo "  QUIC port   : $QUIC_PORT/udp"
 echo "  Secret      : $PHANTOM_SECRET"
 echo "  OBFS key    : $OBFS_KEY"
 echo "  Secrets file: $SECRETS_FILE"
@@ -143,6 +152,7 @@ echo
 echo "  Smoke tests (run from anywhere):"
 echo "    curl -sS http://${PUBLIC_IP4}:${WS_PORT}/api/v1/health"
 echo "    curl -sS http://${PUBLIC_IP4}:${WS_PORT}/ | head -n 5"
+echo "    nc -vu -w2 ${PUBLIC_IP4} ${QUIC_PORT}   # UDP reachability only; no HTTP output expected"
 echo
 echo "  Tail logs:    journalctl -u phantom-server -f -n 50"
 echo "  Restart:      systemctl restart phantom-server"
@@ -155,6 +165,12 @@ echo "      const val CHAIN_SERVER_URL = \"http://${PUBLIC_IP4}:${WS_PORT}\""
 echo "      const val CHAIN_EDGE       = \"${PUBLIC_IP4}:${WS_PORT}\""
 echo "      const val CHAIN_SECRET     = \"${PHANTOM_SECRET}\""
 echo "      const val CHAIN_OBFS_KEY   = \"${OBFS_KEY}\""
+echo
+echo "  Packet Native QUIC test profile:"
+echo "      Server URL : http://${PUBLIC_IP4}:${WS_PORT}"
+echo "      Secret     : ${PHANTOM_SECRET}"
+echo "      Transport  : QUIC"
+echo "      CDN Edge   : ${PUBLIC_IP4}:${QUIC_PORT}"
 echo
 echo "  Then rebuild the Android lib + APK and you're live."
 echo

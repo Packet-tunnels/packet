@@ -589,7 +589,12 @@ class TunnelVpnService : VpnService() {
                 configuration.normalizedCdnEdge,
                 configuration.normalizedHostOverride,
                 configuration.normalizedSniOverride,
-                TunnelTransportMode.MEEK.rawValue,
+                // Hand the configured transport mode straight through; the
+                // chain default is AUTO so the Rust rotation supervisor
+                // (run_rotating_transport) sweeps WS / Obfs / QUIC across
+                // ports until something punches through. Hardcoding MEEK
+                // here would lock us to a single shape that Iran RSTs.
+                configuration.transportMode.rawValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
                 configuration.normalizedObfsKey,

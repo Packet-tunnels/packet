@@ -1254,6 +1254,7 @@ fn parse_transport_mode(value: Option<&str>) -> TransportMode {
         "http" => TransportMode::Http,
         "stealth" | "browser" | "browser-like" | "browser_like" => TransportMode::Stealth,
         "meek" | "fronted-meek" | "fronted_meek" => TransportMode::Meek,
+        "quic" | "udp" | "http3" => TransportMode::Quic,
         "obfs" | "ossh" | "raw" => TransportMode::Obfs,
         _ => TransportMode::Auto,
     }
@@ -1266,6 +1267,7 @@ fn parse_transport_mode_value(value: i32) -> TransportMode {
         3 => TransportMode::Stealth,
         4 => TransportMode::Obfs,
         5 => TransportMode::Meek,
+        6 => TransportMode::Quic,
         _ => TransportMode::Auto,
     }
 }

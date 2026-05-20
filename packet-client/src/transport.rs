@@ -54,6 +54,11 @@ pub enum TransportMode {
     Auto,
     /// Browser-like HTTPS POST transport for stricter DPI environments.
     Stealth,
+    /// UDP-over-QUIC tunnel to our own server. The escape path that
+    /// survives Iran's "RST every TCP TLS handshake" filter because UDP/
+    /// 443 passes for WhatsApp/Meet/Telegram video calls. See
+    /// `quic_tunnel::run_quic_loop` for the wire format.
+    Quic,
     /// Psiphon meek-style HTTP request/response transport. This avoids a
     /// long-lived WebSocket signature by carrying frames over ordinary
     /// browser-looking POST/poll traffic with a session cookie.
@@ -105,13 +110,17 @@ pub struct TransportConfig {
     /// the Psiphon/Conduit-style layer for networks where the foreign IP is
     /// reachable only through a local or private bridge.
     pub upstream_proxy: Option<String>,
+    /// Additional seed hosts the candidate-rotation pool should sweep
+    /// alongside the operator-configured primary. Mirrors Psiphon's
+    /// embedded server list.
+    pub bootstrap_servers: Vec<String>,
 }
 
 impl TransportConfig {
     /// Get the TCP address to connect to.
     /// CDN mode: connects to CDN edge IP.
     /// Direct mode: connects to server IP from URL.
-    fn connect_addr(&self) -> String {
+    pub(crate) fn connect_addr(&self) -> String {
         if let Some(ref edge) = self.cdn_edge {
             if edge.contains(':') {
                 edge.clone()
@@ -228,7 +237,7 @@ impl TransportConfig {
     }
 
     /// Get the SNI to use for TLS handshakes.
-    fn sni_value(&self) -> String {
+    pub(crate) fn sni_value(&self) -> String {
         if let Some(ref sni) = self.sni_override {
             sni.clone()
         } else {
@@ -495,6 +504,9 @@ pub async fn run_transport(
         TransportMode::Meek => {
             run_meek_loop(config, upstream_rx, tunnel_state).await;
         }
+        TransportMode::Quic => {
+            crate::quic_tunnel::run_quic_loop(config, upstream_rx, tunnel_state).await;
+        }
     }
 }
 
@@ -541,6 +553,9 @@ async fn run_rotating_transport(
         let cfg = pool[cand_idx].config.clone();
         let result = match cfg.mode {
             TransportMode::Obfs => obfs_session(&cfg, &mut upstream_rx, &tunnel_state).await,
+            TransportMode::Quic => {
+                crate::quic_tunnel::quic_session_once(&cfg, &mut upstream_rx, &tunnel_state).await
+            }
             _ => ws_session(&cfg, &mut upstream_rx, &tunnel_state).await,
         };
 
@@ -1913,7 +1928,7 @@ async fn http_authenticate(
         .ok_or_else(|| "no token in response".to_string())
 }
 
-fn build_transport_auth_request(
+pub(crate) fn build_transport_auth_request(
     config: &TransportConfig,
     default_mode: Option<&str>,
 ) -> AuthRequest {

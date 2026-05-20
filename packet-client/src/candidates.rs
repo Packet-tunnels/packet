@@ -27,6 +27,21 @@ pub struct Candidate {
 /// Iran's well-known-port filters don't reach.
 const TLS_PORTS: &[u16] = &[443, 8443, 2053, 2083, 2087, 2096];
 const OBFS_PORTS: &[u16] = &[443, 80, 8443, 2053, 2087, 990, 8080];
+/// Ports we try for the QUIC (UDP) tunnel. 443 is what WhatsApp / Meet /
+/// Telegram video use, which is *why* this transport passes Iran's TCP-
+/// only handshake filter — UDP/443 has to stay open for those apps. We
+/// also probe 8443 + 53 since those tend to be open for DoH/DoT.
+const QUIC_PORTS: &[u16] = &[443, 8443, 53];
+
+/// Extra seed hosts to include in the candidate pool, alongside whatever
+/// host the operator configured. These are *additional* origins that have
+/// the same `phantom-server` deployed under different IPs — when one IP
+/// burns the others stay reachable, exactly how Psiphon's embedded server
+/// list works. Empty by default; populated either at compile time from
+/// `PHANTOM_SERVER_POOL` (build-time env, comma-separated `host[:port]`)
+/// or — more importantly — at runtime via the `bootstrap_servers` field
+/// in `ClientConfig`, which the Android / iOS layer plumbs in.
+const EXTRA_SEED_HOSTS: &[&str] = &[];
 
 /// Extract the bare host (no port) the base config is aimed at.
 fn base_host(base: &TransportConfig) -> Option<String> {
@@ -52,28 +67,51 @@ fn with_edge(base: &TransportConfig, host: &str, port: u16) -> TransportConfig {
 /// covering the stubborn cases over the next several minutes.
 pub fn build_candidates(base: &TransportConfig) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
-    let host = base_host(base);
 
-    // 1) The base config exactly as configured — honour the operator's
-    //    intended endpoint/SNI first.
+    // 1) Operator-configured base, exactly as supplied. First because it's
+    //    the known-good combination the operator believed in.
     out.push(Candidate {
         label: "base/as-configured".to_string(),
         config: base.clone(),
     });
 
-    if let Some(host) = host.as_deref() {
-        // 2) Chrome-TLS WebSocket, fragmented, swept across CF TLS ports.
+    // 2) Build the full host pool: the primary host the operator targets,
+    //    plus every host in EXTRA_SEED_HOSTS (and any bootstrap_servers
+    //    plumbed in via the config — see the merge below). Each gets the
+    //    full port × transport sweep, so when one IP burns the others
+    //    keep working — this is exactly Psiphon's "embedded server list"
+    //    behaviour, just merged with the per-host transport diversity.
+    let mut hosts: Vec<String> = Vec::new();
+    if let Some(primary) = base_host(base) {
+        hosts.push(primary);
+    }
+    for extra in base.bootstrap_servers.iter().chain(EXTRA_SEED_HOSTS.iter().copied().map(str::to_string).collect::<Vec<_>>().iter()) {
+        let trimmed = extra.trim();
+        if !trimmed.is_empty() && !hosts.iter().any(|h| h == trimmed) {
+            hosts.push(trimmed.to_string());
+        }
+    }
+
+    for host in &hosts {
+        let host = host.as_str();
+        let host_tag = if hosts.len() > 1 {
+            format!("{}@", host)
+        } else {
+            String::new()
+        };
+
+        // a) Chrome-TLS WebSocket, fragmented, swept across CF TLS ports.
         for &port in TLS_PORTS {
             let mut c = with_edge(base, host, port);
             c.mode = TransportMode::WebSocket;
             c.tls_profile = TlsProfile::BrowserLike;
             c.fragment_enabled = true;
             out.push(Candidate {
-                label: format!("ws+chrome+frag :{}", port),
+                label: format!("{}ws+chrome+frag :{}", host_tag, port),
                 config: c,
             });
         }
-        // 3) Same, fragmentation OFF (some middleboxes flag the fragmenter
+        // b) Same, fragmentation OFF (some middleboxes flag the fragmenter
         //    itself; a clean Chrome hello sometimes passes where frag doesn't).
         for &port in &[443u16, 8443, 2053] {
             let mut c = with_edge(base, host, port);
@@ -81,29 +119,41 @@ pub fn build_candidates(base: &TransportConfig) -> Vec<Candidate> {
             c.tls_profile = TlsProfile::BrowserLike;
             c.fragment_enabled = false;
             out.push(Candidate {
-                label: format!("ws+chrome+nofrag :{}", port),
+                label: format!("{}ws+chrome+nofrag :{}", host_tag, port),
                 config: c,
             });
         }
-        // 4) No-TLS Obfs (OSSH-style uniform-random bytes) across a wide
+        // c) No-TLS Obfs (OSSH-style uniform-random bytes) across a wide
         //    port set — nothing for a TLS/SNI classifier to fire on.
         for &port in OBFS_PORTS {
             let mut c = with_edge(base, host, port);
             c.mode = TransportMode::Obfs;
             c.fragment_enabled = false;
             out.push(Candidate {
-                label: format!("obfs :{}", port),
+                label: format!("{}obfs :{}", host_tag, port),
                 config: c,
             });
         }
-        // 5) Plaintext WebSocket on :80 (CDN HTTP path) — last resort, but
+        // d) QUIC (UDP) tunnel — the path that passes Iran's "TCP-handshake
+        //    RST" filter because UDP/443 carries WhatsApp / Meet / Telegram
+        //    video and can't be wholesale blackholed.
+        for &port in QUIC_PORTS {
+            let mut c = with_edge(base, host, port);
+            c.mode = TransportMode::Quic;
+            c.fragment_enabled = false;
+            out.push(Candidate {
+                label: format!("{}quic/udp :{}", host_tag, port),
+                config: c,
+            });
+        }
+        // e) Plaintext WebSocket on :80 (CDN HTTP path) — last resort, but
         //    occasionally the only thing a strict TLS filter leaves open.
         {
             let mut c = with_edge(base, host, 80);
             c.mode = TransportMode::WebSocket;
             c.fragment_enabled = false;
             out.push(Candidate {
-                label: "ws+plain :80".to_string(),
+                label: format!("{}ws+plain :80", host_tag),
                 config: c,
             });
         }

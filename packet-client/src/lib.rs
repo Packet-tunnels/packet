@@ -22,6 +22,7 @@ pub(crate) mod lane_profile;
 pub(crate) mod mesh;
 pub(crate) mod multi_lane;
 pub(crate) mod peer_discovery;
+pub(crate) mod quic_tunnel;
 pub(crate) mod relay_forwarder;
 pub(crate) mod tls_fragment;
 pub(crate) mod transport;
@@ -100,6 +101,12 @@ pub struct ClientConfig {
     /// Optional first-hop proxy used by transports that support chained
     /// ingress dialing, currently Obfs.
     pub upstream_proxy: Option<String>,
+    /// Extra seed hosts injected into the rotation pool alongside the
+    /// operator-configured primary host. Each gets the full port ×
+    /// transport candidate sweep — equivalent to Psiphon's embedded
+    /// server list. Hosts can be `ip` or `ip:port` (port is ignored when
+    /// the candidate sweep specifies its own).
+    pub bootstrap_servers: Vec<String>,
 }
 
 impl Default for ClientConfig {
@@ -124,6 +131,7 @@ impl Default for ClientConfig {
             decoy_workers: 2,
             obfs_key: None,
             upstream_proxy: None,
+            bootstrap_servers: Vec::new(),
         }
     }
 }
@@ -160,6 +168,7 @@ fn runtime_transport_label(mode: &TransportMode) -> &'static str {
         TransportMode::Stealth => "Stealth",
         TransportMode::Meek => "Meek",
         TransportMode::Obfs => "Obfs",
+        TransportMode::Quic => "QUIC",
     }
 }
 
@@ -473,6 +482,7 @@ pub async fn start_client_with_listener(
         user_agent_override: None,
         obfs_key: config.obfs_key.clone(),
         upstream_proxy: config.upstream_proxy.clone(),
+        bootstrap_servers: config.bootstrap_servers.clone(),
     };
 
     // Spawn the transport loop. If multi_lane_count >= 2 we run the bonded

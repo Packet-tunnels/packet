@@ -508,6 +508,19 @@ class AutoScannerActivity : Activity() {
                 )
             }
 
+            TunnelTransportMode.QUIC -> {
+                checks += DirectNetworkCheck(
+                    label = "quic-udp",
+                    target = "${endpoint.host}:${endpoint.port}",
+                    connectSucceeded = true,
+                    appResponseReceived = false,
+                    statusLine = "UDP probe is runtime-only",
+                    responsePreview = "QUIC reachability is verified by the Packet core handshake.",
+                    error = null,
+                    durationMs = 0,
+                )
+            }
+
             TunnelTransportMode.AUTO -> {
                 checks += runHttpNetworkChecks(
                     endpoint = endpoint,
@@ -923,6 +936,7 @@ class AutoScannerActivity : Activity() {
             TunnelTransportMode.STEALTH -> 40_000L
             TunnelTransportMode.OBFS -> 40_000L
             TunnelTransportMode.MEEK -> 60_000L
+            TunnelTransportMode.QUIC -> 45_000L
             TunnelTransportMode.AUTO -> 25_000L
         }
         val startedAt = System.currentTimeMillis()

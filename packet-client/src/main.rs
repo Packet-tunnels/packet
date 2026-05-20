@@ -116,6 +116,7 @@ fn parse_transport(s: &str) -> phantom_client::TransportMode {
             phantom_client::TransportMode::Stealth
         }
         "meek" | "fronted-meek" | "fronted_meek" => phantom_client::TransportMode::Meek,
+        "quic" | "udp" | "http3" => phantom_client::TransportMode::Quic,
         "obfs" | "ossh" | "raw" => phantom_client::TransportMode::Obfs,
         _ => phantom_client::TransportMode::Auto,
     }

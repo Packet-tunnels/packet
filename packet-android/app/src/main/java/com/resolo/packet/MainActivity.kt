@@ -148,6 +148,14 @@ class MainActivity : Activity() {
 
     private var serversEditMode = false
     private var currentConfiguration = TunnelConfiguration()
+
+    /**
+     * One-shot per process: when the user lands on the app and the selected
+     * profile is the built-in Packet Chain, kick off Connect automatically
+     * so they don't have to tap. Resets to false in `onCreate` so a fresh
+     * launch always tries once.
+     */
+    private var autoConnectAttempted = false
     private var currentConfigurationEntry: SavedTunnelConfiguration? = null
     private var activeConfigurationId: String? = null
     private var activeConfigurationSnapshot: TunnelConfiguration? = null
@@ -231,6 +239,8 @@ class MainActivity : Activity() {
         statusTimerText = findViewById(R.id.statusTimerText)
         configStatusSummary = findViewById(R.id.configStatusSummary)
         statusBannerText = findViewById(R.id.statusBannerText)
+        copyStatusDetailsButton = findViewById(R.id.copyStatusDetailsButton)
+        copyStatusDetailsButton.setOnClickListener { copyStatusDetails() }
         configPrimaryText = findViewById(R.id.configPrimaryText)
         configSecondaryText = findViewById(R.id.configSecondaryText)
         configDetailText = findViewById(R.id.configDetailText)
@@ -411,6 +421,26 @@ class MainActivity : Activity() {
         renderSettingsPage()
         renderState()
         renderDashboard()
+        maybeAutoConnectOnLaunch()
+    }
+
+    /**
+     * If the selected profile is the built-in Packet Chain and the tunnel
+     * is currently idle (cold launch, or a previous run failed), trigger
+     * the Connect action automatically. Fires at most once per process so
+     * the user can still cancel and stay disconnected.
+     */
+    private fun maybeAutoConnectOnLaunch() {
+        if (autoConnectAttempted) return
+        if (!currentConfiguration.usesPacketChain) return
+        val state = TunnelPreferences.loadSnapshot(this).state
+        if (state != TunnelState.IDLE && state != TunnelState.FAILED) return
+        autoConnectAttempted = true
+        TunnelLogStore.append(
+            this,
+            "[AUTO-CONNECT] Packet Chain selected — starting tunnel automatically.",
+        )
+        requestConnect()
     }
 
     override fun onStop() {
@@ -1067,6 +1097,7 @@ class MainActivity : Activity() {
             TunnelTransportMode.STEALTH -> "Stealth"
             TunnelTransportMode.OBFS -> "Obfs"
             TunnelTransportMode.MEEK -> "Meek"
+            TunnelTransportMode.QUIC -> "QUIC"
         }
     }
 
@@ -1661,6 +1692,19 @@ class MainActivity : Activity() {
         val report = TunnelDiagnosticReport.build(this)
         clipboard.setPrimaryClip(ClipData.newPlainText("Packet Diagnostic Report", report))
         Toast.makeText(this, "Diagnostic report copied", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * Copy a full status snapshot (state, error, configuration, runtime,
+     * recent log tail) to the clipboard so the user can share it directly
+     * from the main status screen. Reuses the same builder as the Logs
+     * page so the report format stays consistent.
+     */
+    private fun copyStatusDetails() {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        val report = TunnelDiagnosticReport.build(this)
+        clipboard.setPrimaryClip(ClipData.newPlainText("Packet Status", report))
+        Toast.makeText(this, "Status copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun formatLogLineForDisplay(line: String): String {
