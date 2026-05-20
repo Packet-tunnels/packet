@@ -158,6 +158,7 @@ fn runtime_transport_label(mode: &TransportMode) -> &'static str {
         TransportMode::WebSocket => "WebSocket",
         TransportMode::Auto => "Auto",
         TransportMode::Stealth => "Stealth",
+        TransportMode::Meek => "Meek",
         TransportMode::Obfs => "Obfs",
     }
 }
@@ -463,7 +464,7 @@ pub async fn start_client_with_listener(
         fragment_enabled: config.fragment,
         fragment_size: config.fragment_size,
         spki_pins: selected_bridge_pins(&config, &server_url),
-        tls_profile: if matches!(config.transport, TransportMode::Stealth) {
+        tls_profile: if matches!(config.transport, TransportMode::Stealth | TransportMode::Meek) {
             TlsProfile::BrowserLike
         } else {
             config.tls_profile.clone()
@@ -480,7 +481,8 @@ pub async fn start_client_with_listener(
     // in-process). Otherwise we keep the legacy single-tunnel path.
     let transport_state = tunnel_state.clone();
     let use_multi_lane =
-        config.multi_lane_count >= 2 && !matches!(config.transport, TransportMode::Obfs);
+        config.multi_lane_count >= 2
+            && matches!(config.transport, TransportMode::Auto | TransportMode::WebSocket);
 
     if use_multi_lane {
         let lane_cfg = multi_lane::MultiLaneConfig {

@@ -530,9 +530,31 @@ class TunnelVpnService : VpnService() {
     }
 
     private fun startRustCore(configuration: TunnelConfiguration): Int {
+        // Iran cellular carriers (IranCell, etc.) advertise an HTTP proxy on
+        // the APN that foreign-IP traffic MUST traverse to escape the
+        // network blackhole. Detect it here and chain the Trojan carrier
+        // through it via `upstream_http=`. Operator-set upstreams in the URI
+        // are preserved unchanged.
+        val systemProxy = SystemProxyDetector.detect(this)
+        val effectiveTrojanUri = run {
+            val base = configuration.normalizedTrojanCarrierUri
+            if (systemProxy != null) {
+                val rewritten = SystemProxyDetector.appendToTrojanUri(base, systemProxy)
+                if (rewritten != base) {
+                    TunnelLogStore.append(
+                        this,
+                        "[CHAIN] System HTTP proxy detected ($systemProxy) — routing Trojan carrier via it",
+                    )
+                }
+                rewritten
+            } else {
+                base
+            }
+        }
+
         if (configuration.usesCustomCarrier) {
             return PacketBridge.startLayeredCarrierFull(
-                configuration.normalizedTrojanCarrierUri,
+                effectiveTrojanUri,
                 configuration.carrierProxyPortValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
@@ -541,7 +563,7 @@ class TunnelVpnService : VpnService() {
 
         if (configuration.usesPacketChain) {
             val carrierPort = PacketBridge.startLayeredCarrierFull(
-                configuration.normalizedTrojanCarrierUri,
+                effectiveTrojanUri,
                 configuration.carrierProxyPortValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
@@ -557,7 +579,7 @@ class TunnelVpnService : VpnService() {
             val upstreamProxy = "http://127.0.0.1:$carrierPort"
             TunnelLogStore.append(
                 this,
-                "[CHAIN] DirectSock carrier is listening on 127.0.0.1:$carrierPort; starting Packet WebSocket through it",
+                "[CHAIN] DirectSock carrier is listening on 127.0.0.1:$carrierPort; starting Packet Meek HTTP through it",
             )
 
             return PacketBridge.startClientFull(
@@ -567,7 +589,7 @@ class TunnelVpnService : VpnService() {
                 configuration.normalizedCdnEdge,
                 configuration.normalizedHostOverride,
                 configuration.normalizedSniOverride,
-                TunnelTransportMode.WEBSOCKET.rawValue,
+                TunnelTransportMode.MEEK.rawValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
                 configuration.normalizedObfsKey,

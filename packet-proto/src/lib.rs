@@ -340,6 +340,12 @@ pub struct SyncRequest {
     pub t: String,
     /// Base64-encoded encrypted tunnel message
     pub d: String,
+    /// Optional request id used by meek-style polling clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r: Option<String>,
+    /// Optional camouflage mode label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -35,7 +35,11 @@
       "Bash(cmake --version)",
       "Bash(cat)",
       "Bash(python3 /tmp/chrome_probe.py)",
-      "Bash(grep -E \"test result|chrome_handshake|panicked|assertion|error\\\\[|FAILED|ok$|passed\")"
+      "Bash(grep -E \"test result|chrome_handshake|panicked|assertion|error\\\\[|FAILED|ok$|passed\")",
+      "Bash(grep -rln \"40666\\\\|adb\\\\|psiphon\\\\|Psiphon\\\\|InfoTech\\\\|ConfigurationLog\" --include=\"*.md\" --include=\"*.txt\" --include=\"*.log\" . 2>/dev/null | grep -v node_modules | grep -v target | head -20; echo \"=== recent untracked / staged files ===\"; git status --porcelain --untracked-files=all 2>&1 | head -30; echo \"=== home & desktop dropoff candidates ===\"; ls -lt ~/Desktop ~/Downloads 2>/dev/null | grep -iE \"psiphon|adb|log|infotech|packet|trojan\" | head -10)",
+      "Read(//Users/mohammadshayani/Downloads/**)",
+      "Bash(chmod +x /Users/mohammadshayani/Desktop/packet/deploy-vps.sh)",
+      "Bash(bash -n /Users/mohammadshayani/Desktop/packet/deploy-vps.sh)"
     ],
     "additionalDirectories": [
       "/Users/mohammadshayani/Desktop/packet/packet-android/app/src/main/res/drawable"

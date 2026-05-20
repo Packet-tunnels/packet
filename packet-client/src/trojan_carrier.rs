@@ -735,50 +735,135 @@ fn normalize_host_port(target: &str, default_port: u16) -> Result<String, String
     }
 }
 
+/// Well-known Cloudflare anycast IPs we can rotate to as a first hop when
+/// the operator-configured IP is selectively RST'd. The Host header in the
+/// trojan URI (e.g. `www.creationlong.org`) routes to the right origin via
+/// CF's Host-based routing, so any CF edge IP works — Iran often blocks
+/// specific CF IPs while leaving others reachable, and rotating finds the
+/// one currently allowed.
+const CF_FALLBACK_IPS: &[&str] = &[
+    "1.1.1.1",         // cloudflare-dns.com (very stable CF anycast)
+    "1.0.0.1",         // cloudflare-dns.com secondary
+    "104.16.124.96",   // cdnjs.cloudflare.com (well-known stable CF IP)
+    "104.17.171.94",   // ajax.cloudflare.com
+    "162.159.135.232", // discord-cf anycast
+    "172.64.96.1",     // CF Spectrum (different /24 than 172.64.152)
+    "188.114.96.7",    // CF EU anycast
+];
+
+fn host_is_ip_literal(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
+}
+
 async fn connect_trojan_remote(
     config: &TrojanCarrierConfig,
 ) -> Result<CarrierRemote, Box<dyn std::error::Error + Send + Sync>> {
     let endpoint_already_chrome = is_chrome_fingerprint(config.endpoint.tls_fingerprint.as_deref());
-    let mut attempts = Vec::new();
 
-    // Chrome (BoringSSL) JA3 first — it is the only TLS fingerprint that
-    // survives Iran's handshake RST. The rustls "configured" path always
-    // gets reset there, so trying it first only wastes a round trip and
-    // surfaces a misleading error. Order: fragmented Chrome → unfragmented
-    // Chrome → (only off-DPI networks ever reach these) rustls fallbacks.
+    // Build the TLS mode matrix for the configured first hop. Chrome JA3 is
+    // tried first because it is the only ClientHello that survives Iran's
+    // 2026 DPI; the rustls "configured" entries only matter on off-DPI
+    // networks.
+    let mut primary_modes: Vec<(bool, bool, &'static str)> = Vec::new();
     if config.fragment_tls_hello {
-        attempts.push((true, true, "fragmented Chrome TLS"));
+        primary_modes.push((true, true, "fragmented Chrome TLS"));
     }
-    attempts.push((false, true, "unfragmented Chrome TLS"));
+    primary_modes.push((false, true, "unfragmented Chrome TLS"));
     if !endpoint_already_chrome {
         if config.fragment_tls_hello {
-            attempts.push((true, false, "fragmented configured TLS (fallback)"));
+            primary_modes.push((true, false, "fragmented configured TLS"));
         }
-        attempts.push((false, false, "unfragmented configured TLS (fallback)"));
+        primary_modes.push((false, false, "unfragmented configured TLS"));
+    }
+
+    // Build the (host, label, modes) plan. Configured IP first with the
+    // full mode matrix; then fallback CF IPs with the single best mode
+    // (fragmented Chrome) so total attempts stay bounded.
+    let configured_host = config.endpoint.connect_host.clone();
+    let configured_is_ip = host_is_ip_literal(&configured_host);
+    let mut plan: Vec<(String, &'static str, Vec<(bool, bool, &'static str)>)> = Vec::new();
+    plan.push((configured_host.clone(), "configured", primary_modes.clone()));
+    if configured_is_ip {
+        let best_mode: Vec<(bool, bool, &'static str)> =
+            vec![(config.fragment_tls_hello, true, "fragmented Chrome TLS")];
+        for alt in CF_FALLBACK_IPS {
+            if *alt != configured_host {
+                plan.push((alt.to_string(), "CF anycast fallback", best_mode.clone()));
+            }
+        }
     }
 
     let mut errors = Vec::new();
-    for (fragment_tls_hello, force_chrome_tls, label) in attempts {
-        match connect_trojan_remote_once(config, fragment_tls_hello, force_chrome_tls).await {
-            Ok(remote) => {
-                if force_chrome_tls {
+    for (host, host_label, modes) in plan {
+        // Clone the config and rewrite the first-hop IP. The Host header
+        // (`endpoint.host`) stays as configured so CF routes to the same
+        // origin regardless of which edge IP we land on.
+        let mut alt_config = config.clone();
+        alt_config.endpoint.connect_host = host.clone();
+        info!(
+            "[carrier] first hop {}:{} ({})  sni={} host={} fp={}",
+            host,
+            alt_config.endpoint.connect_port,
+            host_label,
+            alt_config.endpoint.sni,
+            alt_config.endpoint.host,
+            alt_config.endpoint.tls_fingerprint.as_deref().unwrap_or("(unset)"),
+        );
+        for (fragment_tls_hello, force_chrome_tls, label) in modes {
+            let started = std::time::Instant::now();
+            match connect_trojan_remote_once(&alt_config, fragment_tls_hello, force_chrome_tls).await {
+                Ok(remote) => {
                     info!(
-                        "[carrier] DirectSock connected after Chrome TLS fallback ({})",
-                        label
+                        "[carrier] DirectSock CONNECTED via {} [{}] in {}ms",
+                        host,
+                        label,
+                        started.elapsed().as_millis()
                     );
+                    return Ok(remote);
                 }
-                return Ok(remote);
-            }
-            Err(error) => {
-                let error_text = error.to_string();
-                warn!("[carrier] {} failed: {}", label, error_text);
-                errors.push(format!("{}: {}", label, error_text));
+                Err(error) => {
+                    let elapsed_ms = started.elapsed().as_millis();
+                    let error_text = error.to_string();
+                    warn!(
+                        "[carrier] FAIL via {} [{}] after {}ms: {}",
+                        host, label, elapsed_ms, error_text
+                    );
+                    errors.push(format!(
+                        "{}/{} ({}ms): {}",
+                        host, label, elapsed_ms, error_text
+                    ));
+                }
             }
         }
     }
 
+    // Post-mortem: classify the failure mode so the next debug step is
+    // obvious instead of having to read a wall of RST errors. Most concise
+    // taxonomy:
+    //   * all attempts = TCP timeout  → IP blackhole (network filter)
+    //   * all attempts = RST in TLS   → DPI is RSTing the handshake
+    //   * mixed                       → partial reachability
+    let kind = if errors.iter().all(|e| e.contains("timed out")) {
+        "ALL TIMEOUT — first-hop IPs are blackholed on this network. \
+         The carrier proxy / IPv6 / a different network is required."
+    } else if errors.iter().all(|e| {
+        e.contains("reset by peer")
+            || e.contains("RST")
+            || e.contains("handshake failed")
+            || e.contains("eof")
+    }) {
+        "ALL TLS-RST — the DPI is RST'ing the TLS handshake on every CF IP \
+         from this network. Same Chrome ClientHello passes elsewhere, so \
+         the block is connection/destination based, not pure JA3. Try a \
+         non-CF first hop (your own server's IP, IPv6) or the carrier proxy."
+    } else {
+        "MIXED — some first hops timed out, others RST'd. Partial filter."
+    };
+    error!("[carrier] all attempts failed. Diagnosis: {}", kind);
+
     Err(format!(
-        "all DirectSock carrier attempts failed: {}",
+        "all DirectSock carrier attempts failed [{}]: {}",
+        kind,
         errors.join(" | ")
     )
     .into())

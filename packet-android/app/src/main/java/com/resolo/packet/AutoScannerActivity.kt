@@ -479,7 +479,8 @@ class AutoScannerActivity : Activity() {
 
         when (profile.transportMode) {
             TunnelTransportMode.HTTP,
-            TunnelTransportMode.STEALTH -> {
+            TunnelTransportMode.STEALTH,
+            TunnelTransportMode.MEEK -> {
                 checks += runHttpNetworkChecks(
                     endpoint = endpoint,
                     hostHeader = hostHeader,
@@ -921,6 +922,7 @@ class AutoScannerActivity : Activity() {
             TunnelTransportMode.WEBSOCKET -> 18_000L
             TunnelTransportMode.STEALTH -> 40_000L
             TunnelTransportMode.OBFS -> 40_000L
+            TunnelTransportMode.MEEK -> 60_000L
             TunnelTransportMode.AUTO -> 25_000L
         }
         val startedAt = System.currentTimeMillis()

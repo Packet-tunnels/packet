@@ -115,6 +115,7 @@ fn parse_transport(s: &str) -> phantom_client::TransportMode {
         "stealth" | "browser" | "browser-like" | "browser_like" => {
             phantom_client::TransportMode::Stealth
         }
+        "meek" | "fronted-meek" | "fronted_meek" => phantom_client::TransportMode::Meek,
         "obfs" | "ossh" | "raw" => phantom_client::TransportMode::Obfs,
         _ => phantom_client::TransportMode::Auto,
     }
@@ -139,7 +140,11 @@ async fn main() {
     } else {
         parse_transport(&cli.transport)
     };
-    let tls_profile = if cli.stealth || matches!(transport, phantom_client::TransportMode::Stealth)
+    let tls_profile = if cli.stealth
+        || matches!(
+            transport,
+            phantom_client::TransportMode::Stealth | phantom_client::TransportMode::Meek
+        )
     {
         phantom_client::TlsProfile::BrowserLike
     } else {

@@ -258,6 +258,11 @@ async fn main() {
         // Tunnel API — looks like a normal web app API
         .route("/api/v1/auth/login", post(handle_auth))
         .route("/api/v1/lessons/sync", post(handle_sync))
+        // Meek-style aliases. These are the same protocol surface with more
+        // ordinary web-app shapes for clients that avoid long-lived WS flows.
+        .route("/api/v1/library/session", post(handle_auth))
+        .route("/api/v1/lesson/events", post(handle_sync))
+        .route("/api/v1/lesson/metrics", post(handle_sync))
         // WebSocket endpoint — looks like a live lesson streaming feature
         .route("/api/v1/lessons/live", get(ws_upgrade))
         // Relay endpoint — looks like a teacher's streaming setup
@@ -270,7 +275,10 @@ async fn main() {
     if let Some(obfs_port) = cli.obfs_port {
         let obfs_state = state.clone();
         let obfs_key = cli.obfs_key.clone().into_bytes();
-        let obfs_addr = format!("0.0.0.0:{}", obfs_port);
+        // Dual-stack so OBFS gets the same IPv6 escape path as the HTTP/WS
+        // listener below: Iran's edge filter is laxer on v6 for many mobile
+        // carriers, and OBFS to a v6 host can pass where v4 is blackholed.
+        let obfs_addr = format!("[::]:{}", obfs_port);
         tokio::spawn(async move {
             run_obfs_listener(obfs_addr, obfs_key, obfs_state).await;
         });
@@ -280,9 +288,33 @@ async fn main() {
         );
     }
 
-    let addr = format!("0.0.0.0:{}", cli.port);
-    let listener = TcpListener::bind(&addr).await.unwrap();
-    info!("Listening on {}", addr);
+    // Bind dual-stack (IPv6 + IPv4 via v4-mapped) on `[::]:port`. Iran's
+    // 2026 edge filter is *much* more aggressive on IPv4 than on IPv6 —
+    // many mobile carriers (IranCell, MCI) assign v6 prefixes and route v6
+    // traffic to foreign hosts even when v4 to the same host is
+    // blackholed. Exposing the tunnel on v6 gives clients an orthogonal
+    // escape path that does not depend on the v4 blackhole at all. Falls
+    // back to v4-only if the kernel rejects dual-stack (rare).
+    let v6_addr = format!("[::]:{}", cli.port);
+    let v4_addr = format!("0.0.0.0:{}", cli.port);
+    let listener = match TcpListener::bind(&v6_addr).await {
+        Ok(l) => {
+            info!(
+                "Listening on {} (dual-stack: IPv6 + v4-mapped) — IPv4 reachable via the same port",
+                v6_addr
+            );
+            l
+        }
+        Err(err) => {
+            warn!(
+                "[PHANTOM] dual-stack bind on {} failed ({}); falling back to IPv4 only",
+                v6_addr, err
+            );
+            let l = TcpListener::bind(&v4_addr).await.unwrap();
+            info!("Listening on {}", v4_addr);
+            l
+        }
+    };
     axum::serve(listener, app).await.unwrap();
 }
 

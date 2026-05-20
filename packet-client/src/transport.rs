@@ -21,6 +21,7 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use phantom_proto::*;
+use rand::RngCore;
 use reqwest::header::HOST;
 use reqwest::Client;
 use std::error::Error as _;
@@ -53,6 +54,10 @@ pub enum TransportMode {
     Auto,
     /// Browser-like HTTPS POST transport for stricter DPI environments.
     Stealth,
+    /// Psiphon meek-style HTTP request/response transport. This avoids a
+    /// long-lived WebSocket signature by carrying frames over ordinary
+    /// browser-looking POST/poll traffic with a session cookie.
+    Meek,
     /// Raw-TCP OSSH-style obfuscated transport. No TLS ClientHello, no HTTP,
     /// no SNI — the wire is uniform random from byte 0. Designed to slip
     /// past Iran's "RST any foreign TLS handshake" filter. Connects to a
@@ -232,7 +237,8 @@ impl TransportConfig {
     }
 
     fn uses_browser_like_tls(&self) -> bool {
-        self.tls_profile == TlsProfile::BrowserLike || matches!(self.mode, TransportMode::Stealth)
+        self.tls_profile == TlsProfile::BrowserLike
+            || matches!(self.mode, TransportMode::Stealth | TransportMode::Meek)
     }
 }
 
@@ -486,6 +492,9 @@ pub async fn run_transport(
         TransportMode::Stealth => {
             run_stealth_loop(config, upstream_rx, tunnel_state).await;
         }
+        TransportMode::Meek => {
+            run_meek_loop(config, upstream_rx, tunnel_state).await;
+        }
     }
 }
 
@@ -576,6 +585,7 @@ async fn run_rotating_transport(
 // using length-delimited messages. No TLS ClientHello, no SNI, no HTTP —
 // nothing for Iran's "RST any foreign TLS handshake" classifier to fire on.
 
+#[allow(dead_code)]
 async fn run_obfs_loop(
     config: TransportConfig,
     mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
@@ -1520,6 +1530,44 @@ async fn run_http_loop(
     mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
     tunnel_state: Arc<Mutex<TunnelState>>,
 ) {
+    let style = HttpCamouflage::classic();
+    run_http_loop_with_style(config, &mut upstream_rx, tunnel_state, style).await;
+}
+
+#[derive(Clone, Debug)]
+struct HttpCamouflage {
+    auth_path: &'static str,
+    sync_path: &'static str,
+    cookie: Option<String>,
+    mode_label: Option<&'static str>,
+}
+
+impl HttpCamouflage {
+    fn classic() -> Self {
+        Self {
+            auth_path: "/api/v1/auth/login",
+            sync_path: "/api/v1/lessons/sync",
+            cookie: None,
+            mode_label: None,
+        }
+    }
+
+    fn meek() -> Self {
+        Self {
+            auth_path: "/api/v1/library/session",
+            sync_path: "/api/v1/lesson/events",
+            cookie: Some(format!("lesson_session={}", random_cookie_value())),
+            mode_label: Some("meek"),
+        }
+    }
+}
+
+async fn run_http_loop_with_style(
+    config: TransportConfig,
+    upstream_rx: &mut mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: Arc<Mutex<TunnelState>>,
+    style: HttpCamouflage,
+) {
     // Build HTTP client with connection pooling
     let mut client_builder = Client::builder()
         .pool_max_idle_per_host(4)
@@ -1555,6 +1603,28 @@ async fn run_http_loop(
         client_builder = client_builder.resolve(&request_host, connect_addr);
     }
 
+    if let Some(raw_proxy) = config
+        .upstream_proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        match build_reqwest_proxy(raw_proxy) {
+            Ok(proxy) => {
+                info!("[PHANTOM] HTTP/meek upstream proxy enabled: {}", raw_proxy);
+                client_builder = client_builder.proxy(proxy);
+            }
+            Err(error) => {
+                mesh::set_status("failed");
+                mesh::set_last_error(error.clone());
+                set_runtime_state("failed");
+                set_runtime_last_error(error.clone());
+                error!("[PHANTOM] ❌ {}", error);
+                return;
+            }
+        }
+    }
+
     if config.uses_browser_like_tls() {
         info!("[PHANTOM] Browser-like TLS profile enabled: ALPN=h2,http/1.1 headers=Chrome-like");
     }
@@ -1562,18 +1632,19 @@ async fn run_http_loop(
     let http_client = client_builder.build().expect("failed to build HTTP client");
 
     // Authenticate with server
-    let auth_url = config.http_request_url("/api/v1/auth/login");
+    let auth_url = config.http_request_url(style.auth_path);
     info!(
-        "[PHANTOM] HTTP authenticating: url={} host={} connect_addr={}",
+        "[PHANTOM] HTTP authenticating: url={} host={} connect_addr={} style={:?}",
         auth_url,
         config
             .http_host_header()
             .unwrap_or_else(|| "(default)".to_string()),
-        config.connect_addr()
+        config.connect_addr(),
+        style.mode_label
     );
     set_runtime_state("authenticating");
     let token = loop {
-        match http_authenticate(&http_client, &config).await {
+        match http_authenticate(&http_client, &config, &style).await {
             Ok((t, ping_ms)) => {
                 mesh::set_status("connected");
                 mesh::clear_last_error();
@@ -1599,12 +1670,13 @@ async fn run_http_loop(
 
     info!("HTTP authenticated: {}...", &token[..16]);
 
-    let sync_url = config.http_request_url("/api/v1/lessons/sync");
+    let sync_url = config.http_request_url(style.sync_path);
     let key = config.key;
     let mut _last_data = Instant::now();
     let mut consecutive_empty: u32 = 0;
     let poll_active = Duration::from_millis(50);
     let poll_idle = Duration::from_millis(200);
+    let mut request_counter: u64 = 0;
 
     loop {
         // Collect pending upstream messages
@@ -1635,10 +1707,15 @@ async fn run_http_loop(
         let plaintext = encode_frames(&upstream_frames);
         let encrypted = encrypt(&key, &plaintext);
         let encoded = b64_encode(&encrypted);
+        request_counter = request_counter.wrapping_add(1);
 
         let req_body = SyncRequest {
             t: token.clone(),
             d: encoded,
+            r: style
+                .mode_label
+                .map(|mode| format!("{}-{:016x}", mode, request_counter)),
+            m: style.mode_label.map(str::to_string),
         };
 
         let sync_started = Instant::now();
@@ -1647,6 +1724,7 @@ async fn run_http_loop(
             request = request.header(HOST, host);
         }
         request = apply_browser_like_http_headers(request, &config);
+        request = apply_http_camouflage_headers(request, &config, &style);
 
         match request.json(&req_body).send().await {
             Ok(resp) => {
@@ -1759,12 +1837,25 @@ async fn run_stealth_loop(
     run_http_loop(config, upstream_rx, tunnel_state).await;
 }
 
+async fn run_meek_loop(
+    mut config: TransportConfig,
+    mut upstream_rx: mpsc::Receiver<UpstreamMsg>,
+    tunnel_state: Arc<Mutex<TunnelState>>,
+) {
+    config.tls_profile = TlsProfile::BrowserLike;
+    info!(
+        "[PHANTOM] Meek mode: browser-looking HTTP POST/polling with cookie session and upstream proxy support"
+    );
+    run_http_loop_with_style(config, &mut upstream_rx, tunnel_state, HttpCamouflage::meek()).await;
+}
+
 /// HTTP authentication — POST to /api/v1/auth/login
 async fn http_authenticate(
     client: &Client,
     config: &TransportConfig,
+    style: &HttpCamouflage,
 ) -> Result<(String, u32), String> {
-    let url = config.http_request_url("/api/v1/auth/login");
+    let url = config.http_request_url(style.auth_path);
     let body = build_transport_auth_request(config, Some("mesh_client"));
     let host_header = config.http_host_header();
     let connect_addr = config.connect_addr();
@@ -1775,6 +1866,7 @@ async fn http_authenticate(
         request = request.header(HOST, host);
     }
     request = apply_browser_like_http_headers(request, config);
+    request = apply_http_camouflage_headers(request, config, style);
 
     let resp = request
         .json(&body)
@@ -1870,10 +1962,57 @@ fn apply_browser_like_http_headers(
         .header("Sec-Fetch-Site", "same-origin")
 }
 
+fn apply_http_camouflage_headers(
+    request: reqwest::RequestBuilder,
+    config: &TransportConfig,
+    style: &HttpCamouflage,
+) -> reqwest::RequestBuilder {
+    let Some(cookie) = style.cookie.as_deref() else {
+        return request;
+    };
+
+    let host = config.host_value();
+    let scheme = if config.is_tls() { "https" } else { "http" };
+    request
+        .header(reqwest::header::COOKIE, cookie)
+        .header(reqwest::header::REFERER, format!("{}://{}/lessons", scheme, host))
+        .header("X-Requested-With", "XMLHttpRequest")
+}
+
+fn build_reqwest_proxy(raw_proxy: &str) -> Result<reqwest::Proxy, String> {
+    let proxy = TransportUpstreamProxy::parse(raw_proxy)?;
+    match proxy {
+        TransportUpstreamProxy::Http { host, port, auth } => {
+            let proxy_url = format!("http://{}:{}", host, port);
+            let mut proxy = reqwest::Proxy::all(&proxy_url)
+                .map_err(|error| format!("HTTP upstream proxy init failed: {}", error))?;
+            if let Some(auth) = auth {
+                proxy = proxy.basic_auth(&auth.username, &auth.password);
+            }
+            Ok(proxy)
+        }
+        TransportUpstreamProxy::Socks5 { .. } => Err(
+            "HTTP/Meek transport currently supports http:// upstream proxy only; DirectSock exposes http://127.0.0.1:PORT"
+                .to_string(),
+        ),
+    }
+}
+
+fn random_cookie_value() -> String {
+    let mut bytes = [0u8; 18];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    b64_encode(&bytes)
+        .replace('+', "-")
+        .replace('/', "_")
+        .trim_end_matches('=')
+        .to_string()
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Auto Transport (WebSocket → HTTP fallback)
 // ═══════════════════════════════════════════════════════════════
 
+#[allow(dead_code)]
 async fn run_auto_loop(
     config: TransportConfig,
     mut upstream_rx: mpsc::Receiver<UpstreamMsg>,

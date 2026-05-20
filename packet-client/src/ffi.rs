@@ -1253,6 +1253,7 @@ fn parse_transport_mode(value: Option<&str>) -> TransportMode {
         "ws" | "websocket" => TransportMode::WebSocket,
         "http" => TransportMode::Http,
         "stealth" | "browser" | "browser-like" | "browser_like" => TransportMode::Stealth,
+        "meek" | "fronted-meek" | "fronted_meek" => TransportMode::Meek,
         "obfs" | "ossh" | "raw" => TransportMode::Obfs,
         _ => TransportMode::Auto,
     }
@@ -1264,12 +1265,13 @@ fn parse_transport_mode_value(value: i32) -> TransportMode {
         2 => TransportMode::Http,
         3 => TransportMode::Stealth,
         4 => TransportMode::Obfs,
+        5 => TransportMode::Meek,
         _ => TransportMode::Auto,
     }
 }
 
 fn tls_profile_for_transport(transport: &TransportMode) -> TlsProfile {
-    if matches!(transport, TransportMode::Stealth) {
+    if matches!(transport, TransportMode::Stealth | TransportMode::Meek) {
         TlsProfile::BrowserLike
     } else {
         TlsProfile::Default

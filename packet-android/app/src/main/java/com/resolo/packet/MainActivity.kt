@@ -79,6 +79,7 @@ class MainActivity : Activity() {
     private lateinit var statusTimerText: TextView
     private lateinit var configStatusSummary: TextView
     private lateinit var statusBannerText: TextView
+    private lateinit var copyStatusDetailsButton: Button
     private lateinit var configPrimaryText: TextView
     private lateinit var configSecondaryText: TextView
     private lateinit var configDetailText: TextView
@@ -1065,6 +1066,7 @@ class MainActivity : Activity() {
             TunnelTransportMode.HTTP -> "HTTP"
             TunnelTransportMode.STEALTH -> "Stealth"
             TunnelTransportMode.OBFS -> "Obfs"
+            TunnelTransportMode.MEEK -> "Meek"
         }
     }
 
@@ -1352,7 +1354,7 @@ class MainActivity : Activity() {
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
         editorDirectSockSection.visibility = if (isDirectSock || isPacketChain) View.VISIBLE else View.GONE
         editorTransportRow.text = when {
-            isPacketChain -> "Transport      WebSocket through DirectSock"
+            isPacketChain -> "Transport      Meek HTTP through DirectSock"
             isPrivateRelay -> "Transport      Private WebSocket relay"
             else -> "Transport      ${displayTransportMode(editorTransportMode)}"
         }

@@ -18,7 +18,8 @@ enum class TunnelTransportMode(val rawValue: Int, val title: String) {
     WEBSOCKET(1, "WebSocket"),
     HTTP(2, "HTTP"),
     STEALTH(3, "Stealth"),
-    OBFS(4, "Obfs");
+    OBFS(4, "Obfs"),
+    MEEK(5, "Meek");
 
     companion object {
         fun fromRawValue(value: Int): TunnelTransportMode {
@@ -71,7 +72,7 @@ object PacketDefaultProfiles {
             cdnEdge = CHAIN_EDGE,
             hostOverride = "",
             sniOverride = "",
-            transportMode = TunnelTransportMode.WEBSOCKET,
+            transportMode = TunnelTransportMode.MEEK,
             obfsKey = CHAIN_OBFS_KEY,
             upstreamProxy = "",
             fragmentEnabled = true,
@@ -200,6 +201,7 @@ data class TunnelConfiguration(
             usesPacketChain -> "Trojan + Packet"
             usesCustomCarrier -> "DirectSock"
             transportMode == TunnelTransportMode.OBFS -> "Obfs raw TCP"
+            transportMode == TunnelTransportMode.MEEK -> "Meek HTTP"
             transportMode == TunnelTransportMode.STEALTH -> "Stealth TLS"
             normalizedSniOverride.isNotEmpty() -> "SNI fronting"
             normalizedCdnEdge.isNotEmpty() || normalizedHostOverride.isNotEmpty() -> "CDN relay"
