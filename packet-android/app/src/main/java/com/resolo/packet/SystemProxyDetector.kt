@@ -14,7 +14,7 @@ import java.net.URLEncoder
  * Psiphon respects the system proxy as its first hop, we did not.
  *
  * This helper finds the proxy Android currently advertises and rewrites the
- * Trojan carrier URI to chain through it via `upstream_http=...`. An
+ * carrier URI to chain through it via `upstream_http=...`. An
  * operator-supplied upstream is never overwritten.
  *
  * Works for Wi-Fi with a manual proxy too — same code path.
@@ -38,7 +38,7 @@ object SystemProxyDetector {
     }
 
     /**
-     * Append `upstream_http=<hostPort>` to a `trojan://...` URI, before the
+     * Append `upstream_http=<hostPort>` to a carrier URI, before the
      * fragment, unless the URI already specifies an upstream.
      */
     fun appendToTrojanUri(uri: String, hostPort: String): String {

@@ -50,6 +50,9 @@ private data class StatusPalette(
     val bannerText: Int,
 )
 
+private const val ADD_MENU_PASTE = 1
+private const val ADD_MENU_MANUAL = 2
+
 class MainActivity : Activity() {
     private enum class RootTab {
         STATUS,
@@ -328,7 +331,7 @@ class MainActivity : Activity() {
         navHome.setOnClickListener { selectRootTab(RootTab.STATUS) }
         navServers.setOnClickListener { selectRootTab(RootTab.SERVERS) }
         navSettings.setOnClickListener { selectRootTab(RootTab.SETTINGS) }
-        serversAddButton.setOnClickListener { showConfigurationEditor(existing = null) }
+        serversAddButton.setOnClickListener { showAddConfigurationMenu(it) }
         serversEditButton.setOnClickListener { toggleServersEditMode() }
         settingsPrivacyLinkRow.setOnClickListener { openUrl(PRIVACY_URL) }
         settingsTermsLinkRow.setOnClickListener { openUrl(TERMS_URL) }
@@ -1378,6 +1381,66 @@ class MainActivity : Activity() {
         selectRootTab(RootTab.EDITOR)
     }
 
+    private fun showAddConfigurationMenu(anchor: View) {
+        PopupMenu(this, anchor, android.view.Gravity.END).apply {
+            menu.add(0, ADD_MENU_PASTE, 0, "Paste from clipboard")
+            menu.add(0, ADD_MENU_MANUAL, 1, "Manual")
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    ADD_MENU_PASTE -> {
+                        importConfigurationFromClipboard()
+                        true
+                    }
+                    ADD_MENU_MANUAL -> {
+                        showConfigurationEditor(existing = null)
+                        true
+                    }
+                    else -> false
+                }
+            }
+            show()
+        }
+    }
+
+    private fun importConfigurationFromClipboard() {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        val clipboardText = clipboard
+            ?.primaryClip
+            ?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(this)
+            ?.toString()
+            .orEmpty()
+
+        if (clipboardText.isBlank()) {
+            Toast.makeText(this, "Clipboard is empty.", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val imported = TunnelConfiguration.importedFromText(clipboardText)
+        if (imported == null) {
+            Toast.makeText(
+                this,
+                "Clipboard does not contain a supported trojan://, vless://, or V2Ray VLESS config.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+
+        val saved = TunnelPreferences.addConfiguration(
+            context = this,
+            name = imported.name,
+            configuration = imported.configuration,
+        )
+        refreshConfigurationState()
+        renderServersPage()
+        renderSettingsPage()
+        renderConfigurationSummary()
+        renderDashboard()
+        selectRootTab(RootTab.SERVERS)
+        Toast.makeText(this, "Added ${saved.displayName}", Toast.LENGTH_SHORT).show()
+    }
+
     private fun renderEditorMode() {
         val isDirectSock = editorStackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
         val isPacketChain = editorStackMode == TunnelStackMode.PACKET_CHAIN
@@ -1387,7 +1450,7 @@ class MainActivity : Activity() {
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
         editorDirectSockSection.visibility = if (isDirectSock || isPacketChain || isPsiphonChain) View.VISIBLE else View.GONE
         editorTransportRow.text = when {
-            isPacketChain -> "Transport      Auto through DirectSock"
+            isPacketChain -> "Transport      Auto through carrier"
             isPsiphonChain -> "Transport      Auto through Psiphon"
             isPrivateRelay -> "Transport      Private WebSocket relay"
             else -> "Transport      ${displayTransportMode(editorTransportMode)}"

@@ -1,8 +1,11 @@
 import SwiftUI
+import UIKit
 
 struct PacketServersView: View {
     @ObservedObject var tunnelManager: TunnelManager
     @State private var sheetMode: ConfigurationSheetMode?
+    @State private var importErrorMessage = ""
+    @State private var showingImportError = false
 
     private var isShowingActiveConfiguration: Bool {
         tunnelManager.isRunning || tunnelManager.telemetry.snapshot.tunnelActive
@@ -55,7 +58,15 @@ struct PacketServersView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: { sheetMode = .create }) {
+                    Menu {
+                        Button(action: importConfigurationFromClipboard) {
+                            Label("Paste from Clipboard", systemImage: "doc.on.clipboard")
+                        }
+
+                        Button(action: { sheetMode = .create }) {
+                            Label("Manual", systemImage: "square.and.pencil")
+                        }
+                    } label: {
                         Image(systemName: "plus")
                             .fontWeight(.medium)
                     }
@@ -67,7 +78,36 @@ struct PacketServersView: View {
                     mode: mode
                 )
             }
+            .alert("Import Failed", isPresented: $showingImportError) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(importErrorMessage)
+            }
         }
+    }
+
+    private func importConfigurationFromClipboard() {
+        guard let clipboardText = UIPasteboard.general.string,
+            !clipboardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            showImportError("Clipboard is empty.")
+            return
+        }
+
+        do {
+            let imported = try TunnelConfiguration.importedFromText(clipboardText)
+            tunnelManager.addConfiguration(
+                named: imported.name,
+                configuration: imported.configuration
+            )
+        } catch {
+            showImportError(error.localizedDescription)
+        }
+    }
+
+    private func showImportError(_ message: String) {
+        importErrorMessage = message
+        showingImportError = true
     }
 }
 
@@ -146,9 +186,9 @@ private struct ConfigurationEditorSheet: View {
                     Text("Profile Details")
                 }
 
-                if draftConfiguration.usesCustomCarrier {
+                if draftConfiguration.usesCarrierBackbone {
                     Section {
-                        TextField("trojan://password@edge:443?type=tcp&security=tls&fp=chrome", text: $draftConfiguration.trojanCarrierURI)
+                        TextField("trojan:// or vless:// carrier URI / V2Ray JSON", text: $draftConfiguration.trojanCarrierURI)
                             .keyboardType(.URL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -163,7 +203,7 @@ private struct ConfigurationEditorSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     } header: {
-                        Text("DirectSock Trojan")
+                        Text("DirectSock Carrier")
                     }
 
                     Section {
@@ -182,9 +222,11 @@ private struct ConfigurationEditorSheet: View {
                     } header: {
                         Text("Advanced")
                     } footer: {
-                        Text("Trojan TCP/TLS or WS/TLS link.")
+                        Text("Trojan, VLESS, or V2Ray JSON with a VLESS outbound.")
                     }
-                } else {
+                }
+
+                if !draftConfiguration.usesCustomCarrier {
                     Section {
                         TextField("https://example.com", text: $draftConfiguration.serverURL)
                             .keyboardType(.URL)

@@ -2,12 +2,14 @@
 set -euo pipefail
 
 ANDROID_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$ANDROID_DIR/.." && pwd)"
 LAB_DIR="${PSIPHON_LAB_DIR:-$ANDROID_DIR/.psiphon-core-lab}"
 BIN_REPO="$LAB_DIR/psiphon-tunnel-core-binaries"
 BIN_REPO_URL="${PSIPHON_BIN_REPO_URL:-https://github.com/Psiphon-Labs/psiphon-tunnel-core-binaries.git}"
 SERVER_DIR="${PSIPHON_SERVER_DIR:-$LAB_DIR/server}"
 CLIENT_DIR="${PSIPHON_CLIENT_DIR:-$LAB_DIR/client}"
 ASSET_DIR="$ANDROID_DIR/app/src/main/assets/psiphon"
+IOS_ASSET_DIR="$ROOT_DIR/packet-ios/PacketTunnel/Resources/psiphon"
 
 PSIPHOND="$BIN_REPO/psiphond/psiphond"
 CONSOLE_CLIENT="$BIN_REPO/linux/psiphon-tunnel-core-x86_64"
@@ -150,6 +152,9 @@ install_client_asset() {
   mkdir -p "$ASSET_DIR"
   cp "$CLIENT_DIR/client.config" "$ASSET_DIR/client.config"
   echo "Installed embedded Psiphon client config: $ASSET_DIR/client.config"
+  mkdir -p "$IOS_ASSET_DIR"
+  cp "$CLIENT_DIR/client.config" "$IOS_ASSET_DIR/client.config"
+  echo "Installed embedded Psiphon iOS client config: $IOS_ASSET_DIR/client.config"
 }
 
 print_state() {
@@ -161,6 +166,7 @@ Psiphon core lab:
   server_dir=$SERVER_DIR
   client_config=$CLIENT_DIR/client.config
   android_asset=$ASSET_DIR/client.config
+  ios_asset=$IOS_ASSET_DIR/client.config
   protocol=${PROTOCOL}:${PORT}
   local_http_proxy_port=$LOCAL_HTTP_PROXY_PORT
   local_socks_proxy_port=$LOCAL_SOCKS_PROXY_PORT

@@ -71,6 +71,11 @@ targets:
       - SharedTunnel
     resources:
       - PacketTunnel/PrivacyInfo.xcprivacy
+      - path: PacketTunnel/Resources/psiphon
+        type: folder
+    dependencies:
+      - framework: Frameworks/PsiphonTunnel.xcframework
+        embed: true
     settings:
       APPLICATION_EXTENSION_API_ONLY: YES
       CURRENT_PROJECT_VERSION: 1

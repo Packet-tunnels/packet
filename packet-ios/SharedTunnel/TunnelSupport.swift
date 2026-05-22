@@ -37,6 +37,16 @@ enum TunnelProviderKeys {
 enum TunnelStackMode: Int32, CaseIterable, Identifiable, Codable {
     case packetNative = 0
     case customTrojanCarrier = 1
+    case packetChain = 2
+    case privateRelay = 3
+    case psiphonChain = 4
+
+    static let allCases: [TunnelStackMode] = [
+        .packetNative,
+        .customTrojanCarrier,
+        .packetChain,
+        .psiphonChain
+    ]
 
     var id: Int32 { rawValue }
 
@@ -46,6 +56,12 @@ enum TunnelStackMode: Int32, CaseIterable, Identifiable, Codable {
             return "Packet Native"
         case .customTrojanCarrier:
             return "DirectSock"
+        case .packetChain:
+            return "Packet Chain"
+        case .privateRelay:
+            return "Private Relay"
+        case .psiphonChain:
+            return "Psiphon Chain"
         }
     }
 }
@@ -56,6 +72,8 @@ enum TunnelTransportMode: Int32, CaseIterable, Identifiable, Codable {
     case http = 2
     case stealth = 3
     case obfs = 4
+    case meek = 5
+    case quic = 6
 
     var id: Int32 { rawValue }
 
@@ -71,7 +89,59 @@ enum TunnelTransportMode: Int32, CaseIterable, Identifiable, Codable {
             return "Stealth"
         case .obfs:
             return "Obfs"
+        case .meek:
+            return "Meek"
+        case .quic:
+            return "QUIC"
         }
+    }
+}
+
+enum PacketDefaultProfiles {
+    static let chainName = "Packet Chain"
+    static let psiphonChainName = "Psiphon Escape"
+    static let chainServerURL = "http://185.167.98.98:80"
+    static let chainSecret = "4ff204d5baf2f12406a45a4b2793c508f2cec2dfab865f9c8904eb5cec2024b2"
+    static let chainEdge = "185.167.98.98:80"
+    static let chainObfsKey = "1dbe8442ad975fb80a497d0cda4a547844cb81aefec8520e5a15055634585ee7"
+    static let chainTrojanURI =
+        "trojan://humanity@172.64.152.23:80?path=%2Fassignment&security=none&host=www.creationlong.org&type=ws#%40InfoTech_VK"
+    static let psiphonLocalHTTPPort = 18080
+    static let psiphonLocalSocksPort = 18081
+
+    static var packetChainConfiguration: TunnelConfiguration {
+        var configuration = TunnelConfiguration()
+        configuration.stackMode = .packetChain
+        configuration.serverURL = chainServerURL
+        configuration.secret = chainSecret
+        configuration.listenPort = ""
+        configuration.cdnEdge = chainEdge
+        configuration.transportMode = .auto
+        configuration.obfsKey = chainObfsKey
+        configuration.fragmentEnabled = true
+        configuration.fragmentSize = "100"
+        configuration.trojanCarrierURI = chainTrojanURI
+        configuration.carrierProxyPort = "10808"
+        return configuration
+    }
+
+    static var psiphonChainConfiguration: TunnelConfiguration {
+        var configuration = packetChainConfiguration
+        configuration.stackMode = .psiphonChain
+        return configuration
+    }
+
+    static var quicConfiguration: TunnelConfiguration {
+        var configuration = TunnelConfiguration()
+        configuration.stackMode = .packetNative
+        configuration.serverURL = chainServerURL
+        configuration.secret = chainSecret
+        configuration.listenPort = ""
+        configuration.cdnEdge = "185.167.98.98:443"
+        configuration.transportMode = .quic
+        configuration.fragmentEnabled = false
+        configuration.fragmentSize = "0"
+        return configuration
     }
 }
 
@@ -228,8 +298,70 @@ struct TunnelConfiguration: Codable, Equatable {
         Self.trimmed(trojanCarrierURI)
     }
 
+    var executableCarrierURI: String {
+        Self.extractVlessURIFromV2RayJSON(normalizedTrojanCarrierURI) ?? normalizedTrojanCarrierURI
+    }
+
+    var carrierProtocolLabel: String {
+        if usesRealityCarrier {
+            return normalizedTrojanCarrierURI.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{")
+                ? "V2Ray VLESS Reality"
+                : "VLESS Reality"
+        }
+
+        let executable = executableCarrierURI.lowercased()
+        if executable.hasPrefix("vless://") {
+            return "VLESS"
+        }
+
+        if normalizedTrojanCarrierURI.lowercased().hasPrefix("vmess://") {
+            return "VMess"
+        }
+
+        if normalizedTrojanCarrierURI.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{") {
+            return "V2Ray JSON"
+        }
+
+        if executable.hasPrefix("trojan://") {
+            return "Trojan"
+        }
+
+        return "Carrier"
+    }
+
+    var isSupportedCarrierURI: Bool {
+        let executable = executableCarrierURI.lowercased()
+        return executable.hasPrefix("trojan://") || executable.hasPrefix("vless://")
+    }
+
+    var usesRealityCarrier: Bool {
+        guard executableCarrierURI.lowercased().hasPrefix("vless://"),
+            let security = Self.queryValue("security", in: executableCarrierURI)
+        else {
+            return false
+        }
+
+        return security.lowercased() == "reality"
+    }
+
     var usesCustomCarrier: Bool {
         stackMode == .customTrojanCarrier
+    }
+
+    var usesPacketChain: Bool {
+        stackMode == .packetChain
+    }
+
+    var usesPrivateRelay: Bool {
+        stackMode == .privateRelay
+    }
+
+    var usesPsiphonChain: Bool {
+        stackMode == .psiphonChain
+    }
+
+    var usesCarrierBackbone: Bool {
+        usesCustomCarrier || usesPacketChain || usesPsiphonChain
     }
 
     var cdnEdgeValidationError: String? {
@@ -286,6 +418,12 @@ struct TunnelConfiguration: Codable, Equatable {
             return layeredValidationError
         }
 
+        if usesPacketChain || usesPsiphonChain {
+            if let layeredValidationError {
+                return layeredValidationError
+            }
+        }
+
         if cdnEdgeValidationError != nil {
             return cdnEdgeValidationError
         }
@@ -325,6 +463,12 @@ struct TunnelConfiguration: Codable, Equatable {
             return layeredValidationError
         }
 
+        if usesPacketChain || usesPsiphonChain {
+            if let layeredValidationError {
+                return layeredValidationError
+            }
+        }
+
         if normalizedServerURL.isEmpty {
             return "Server URL is required."
         }
@@ -338,11 +482,11 @@ struct TunnelConfiguration: Codable, Equatable {
 
     private var layeredValidationError: String? {
         if normalizedTrojanCarrierURI.isEmpty {
-            return "Trojan URI is required for DirectSock mode."
+            return "Carrier URI is required for this chain."
         }
 
-        if !normalizedTrojanCarrierURI.lowercased().hasPrefix("trojan://") {
-            return "DirectSock URI must start with trojan://."
+        if !isSupportedCarrierURI {
+            return "Carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
         }
 
         guard carrierProxyPortValue != nil else {
@@ -358,6 +502,8 @@ struct TunnelConfiguration: Codable, Equatable {
 
     var usesAdvancedStart: Bool {
         usesCustomCarrier ||
+            usesPacketChain ||
+            usesPsiphonChain ||
             usesCDN ||
             !normalizedSNIOverride.isEmpty ||
             !normalizedObfsKey.isEmpty ||
@@ -390,7 +536,7 @@ struct TunnelConfiguration: Codable, Equatable {
     }
 
     var remoteAddress: String {
-        if usesCustomCarrier {
+        if usesCarrierBackbone {
             return carrierEndpointHost
         }
 
@@ -408,7 +554,15 @@ struct TunnelConfiguration: Codable, Equatable {
 
     var ingressLabel: String {
         if usesCustomCarrier {
-            return "DirectSock"
+            return carrierProtocolLabel
+        }
+
+        if usesPsiphonChain {
+            return "\(carrierProtocolLabel) + Psiphon + Packet"
+        }
+
+        if usesPacketChain {
+            return "\(carrierProtocolLabel) + Packet"
         }
 
         if transportMode == .stealth {
@@ -432,7 +586,15 @@ struct TunnelConfiguration: Codable, Equatable {
 
     var suggestedName: String {
         if usesCustomCarrier {
-            return "DirectSock"
+            return carrierProtocolLabel
+        }
+
+        if usesPsiphonChain {
+            return PacketDefaultProfiles.psiphonChainName
+        }
+
+        if usesPacketChain {
+            return PacketDefaultProfiles.chainName
         }
 
         if !normalizedHostOverride.isEmpty {
@@ -459,7 +621,7 @@ struct TunnelConfiguration: Codable, Equatable {
     }
 
     var endpointHost: String {
-        if usesCustomCarrier {
+        if usesCarrierBackbone {
             return carrierEndpointHost
         }
 
@@ -477,7 +639,7 @@ struct TunnelConfiguration: Codable, Equatable {
     }
 
     var endpointPort: Int {
-        if usesCustomCarrier {
+        if usesCarrierBackbone {
             return carrierEndpointPort
         }
 
@@ -496,11 +658,11 @@ struct TunnelConfiguration: Codable, Equatable {
     }
 
     private var carrierEndpointHost: String {
-        URL(string: normalizedTrojanCarrierURI)?.host?.nilIfEmpty ?? "Unavailable"
+        URL(string: executableCarrierURI)?.host?.nilIfEmpty ?? "Unavailable"
     }
 
     private var carrierEndpointPort: Int {
-        if let port = URL(string: normalizedTrojanCarrierURI)?.port, port > 0 {
+        if let port = URL(string: executableCarrierURI)?.port, port > 0 {
             return port
         }
 
@@ -537,7 +699,7 @@ struct TunnelConfiguration: Codable, Equatable {
             TunnelProviderKeys.upstreamProxy: normalizedUpstreamProxy,
             TunnelProviderKeys.fragmentEnabled: fragmentEnabled,
             TunnelProviderKeys.fragmentSize: Int(fragmentSizeValue),
-            TunnelProviderKeys.trojanCarrierURI: normalizedTrojanCarrierURI,
+            TunnelProviderKeys.trojanCarrierURI: executableCarrierURI,
             TunnelProviderKeys.carrierProxyPort: Int(effectiveCarrierProxyPort)
         ]
 
@@ -546,6 +708,168 @@ struct TunnelConfiguration: Codable, Equatable {
         }
 
         return configuration
+    }
+
+    static func importedFromText(_ raw: String) throws -> ImportedTunnelConfiguration {
+        let carrierText = try firstImportableCarrierText(from: raw)
+        var configuration = TunnelConfiguration()
+        configuration.stackMode = .customTrojanCarrier
+        configuration.trojanCarrierURI = carrierText
+        configuration.carrierProxyPort = "10808"
+
+        if let validationError = configuration.advancedValidationError {
+            throw TunnelConfigurationImportError.unsupported(validationError)
+        }
+
+        return ImportedTunnelConfiguration(
+            name: importedCarrierName(for: configuration),
+            configuration: configuration
+        )
+    }
+
+    private static func firstImportableCarrierText(from raw: String) throws -> String {
+        let trimmed = trimmed(raw)
+        guard !trimmed.isEmpty else {
+            throw TunnelConfigurationImportError.emptyClipboard
+        }
+
+        if trimmed.hasPrefix("{"), extractVlessURIFromV2RayJSON(trimmed) != nil {
+            return trimmed
+        }
+
+        guard let range = trimmed.range(
+            of: #"\b(?:trojan|vless)://\S+"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) else {
+            throw TunnelConfigurationImportError.unsupported(
+                "Clipboard does not contain a supported trojan://, vless://, or V2Ray VLESS config."
+            )
+        }
+
+        let trailingCharacters = CharacterSet(charactersIn: "\"',.;)]")
+            .union(.whitespacesAndNewlines)
+        let uri = String(trimmed[range]).trimmingCharacters(in: trailingCharacters)
+        guard uri.lowercased().hasPrefix("trojan://") || uri.lowercased().hasPrefix("vless://") else {
+            throw TunnelConfigurationImportError.unsupported(
+                "Clipboard does not contain a supported trojan://, vless://, or V2Ray VLESS config."
+            )
+        }
+
+        return uri
+    }
+
+    private static func importedCarrierName(for configuration: TunnelConfiguration) -> String {
+        let components = URLComponents(string: configuration.executableCarrierURI)
+        let fragment = components?.fragment?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let host = components?.host?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let label = configuration.carrierProtocolLabel
+
+        if !fragment.isEmpty {
+            return "\(label) - \(fragment)"
+        }
+
+        if !host.isEmpty {
+            return "\(label) - \(host)"
+        }
+
+        return label
+    }
+
+    private static func queryValue(_ name: String, in uri: String) -> String? {
+        URLComponents(string: uri)?
+            .queryItems?
+            .first { $0.name.caseInsensitiveCompare(name) == .orderedSame }?
+            .value?
+            .nilIfEmpty
+    }
+
+    private static func extractVlessURIFromV2RayJSON(_ raw: String) -> String? {
+        let trimmedRaw = trimmed(raw)
+        guard trimmedRaw.hasPrefix("{"), let data = trimmedRaw.data(using: .utf8) else {
+            return nil
+        }
+
+        guard
+            let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let outbounds = root["outbounds"] as? [[String: Any]]
+        else {
+            return nil
+        }
+
+        for outbound in outbounds {
+            guard
+                let protocolName = outbound["protocol"] as? String,
+                protocolName.caseInsensitiveCompare("vless") == .orderedSame,
+                let settings = outbound["settings"] as? [String: Any],
+                let vnext = settings["vnext"] as? [[String: Any]],
+                let firstVnext = vnext.first,
+                let address = firstVnext["address"] as? String,
+                !trimmed(address).isEmpty,
+                let users = firstVnext["users"] as? [[String: Any]],
+                let firstUser = users.first,
+                let id = firstUser["id"] as? String,
+                !trimmed(id).isEmpty
+            else {
+                continue
+            }
+
+            let port = (firstVnext["port"] as? Int).flatMap { (1...65535).contains($0) ? $0 : nil } ?? 443
+            let stream = outbound["streamSettings"] as? [String: Any]
+            let network = trimmed(stream?["network"] as? String ?? "").nilIfEmpty ?? "tcp"
+            let security = trimmed(stream?["security"] as? String ?? "").nilIfEmpty ?? "tls"
+            let ws = stream?["wsSettings"] as? [String: Any]
+            let wsHeaders = ws?["headers"] as? [String: Any]
+            let tls = stream?["tlsSettings"] as? [String: Any]
+            let reality = stream?["realitySettings"] as? [String: Any]
+            let serverName = security.caseInsensitiveCompare("reality") == .orderedSame
+                ? trimmed(reality?["serverName"] as? String ?? "")
+                : trimmed(tls?["serverName"] as? String ?? "")
+
+            var components = URLComponents()
+            components.scheme = "vless"
+            components.user = trimmed(id)
+            components.host = trimmed(address)
+            components.port = port
+
+            var queryItems = [
+                URLQueryItem(name: "type", value: network),
+                URLQueryItem(
+                    name: "encryption",
+                    value: trimmed(firstUser["encryption"] as? String ?? "").nilIfEmpty ?? "none"
+                ),
+                URLQueryItem(name: "security", value: security)
+            ]
+
+            appendQueryItem("path", value: ws?["path"] as? String, to: &queryItems)
+            appendQueryItem("host", value: wsHeaders?["Host"] as? String, to: &queryItems)
+            appendQueryItem("sni", value: serverName, to: &queryItems)
+            appendQueryItem("fp", value: reality?["fingerprint"] as? String, to: &queryItems)
+            appendQueryItem("pbk", value: reality?["publicKey"] as? String, to: &queryItems)
+            appendQueryItem("sid", value: reality?["shortId"] as? String, to: &queryItems)
+            appendQueryItem("spx", value: reality?["spiderX"] as? String, to: &queryItems)
+            appendQueryItem("flow", value: firstUser["flow"] as? String, to: &queryItems)
+
+            components.queryItems = queryItems
+            if let tag = trimmed(outbound["tag"] as? String ?? "").nilIfEmpty {
+                components.fragment = tag
+            }
+
+            if let uri = components.string {
+                return uri
+            }
+        }
+
+        return nil
+    }
+
+    private static func appendQueryItem(
+        _ name: String,
+        value: String?,
+        to queryItems: inout [URLQueryItem]
+    ) {
+        let trimmedValue = trimmed(value ?? "")
+        guard !trimmedValue.isEmpty else { return }
+        queryItems.append(URLQueryItem(name: name, value: trimmedValue))
     }
 
     private static func trimmed(_ value: String) -> String {
@@ -559,6 +883,25 @@ struct TunnelConfiguration: Codable, Equatable {
         }
 
         return port
+    }
+}
+
+struct ImportedTunnelConfiguration {
+    let name: String
+    let configuration: TunnelConfiguration
+}
+
+enum TunnelConfigurationImportError: LocalizedError {
+    case emptyClipboard
+    case unsupported(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyClipboard:
+            return "Clipboard is empty."
+        case .unsupported(let message):
+            return message
+        }
     }
 }
 
@@ -588,6 +931,14 @@ struct SavedTunnelConfiguration: Codable, Equatable, Identifiable {
     var subtitle: String {
         if configuration.usesCustomCarrier {
             return configuration.normalizedTrojanCarrierURI.nilIfEmpty ?? "DirectSock not configured"
+        }
+
+        if configuration.usesPsiphonChain {
+            return "\(configuration.carrierProtocolLabel) via Psiphon"
+        }
+
+        if configuration.usesPacketChain {
+            return "\(configuration.carrierProtocolLabel) via Packet"
         }
 
         return configuration.normalizedServerURL.nilIfEmpty ?? "Not configured"
@@ -797,21 +1148,49 @@ enum TunnelRuntimeBridge {
         phantom_set_log_callback(rustLogCallback)
     }
 
-    static func startRustClient(with configuration: TunnelConfiguration) -> Int32 {
+    static func startRustClient(
+        with configuration: TunnelConfiguration,
+        upstreamProxyOverride: String? = nil
+    ) -> Int32 {
         installLogCallback()
 
         if configuration.usesCustomCarrier {
-            return configuration.normalizedTrojanCarrierURI.withCString { uriPointer in
-                phantom_start_layered_carrier_full(
-                    uriPointer,
-                    configuration.effectiveCarrierProxyPort,
-                    configuration.fragmentEnabled ? 1 : 0,
-                    configuration.fragmentSizeValue
-                )
-            }
+            return startLayeredCarrier(with: configuration)
         }
 
+        if configuration.usesPacketChain {
+            let carrierPort = startLayeredCarrier(with: configuration)
+            guard carrierPort > 0 else {
+                return carrierPort
+            }
+            return startPacketClient(
+                with: configuration,
+                upstreamProxyOverride: "http://127.0.0.1:\(carrierPort)"
+            )
+        }
+
+        return startPacketClient(with: configuration, upstreamProxyOverride: upstreamProxyOverride)
+    }
+
+    static func startLayeredCarrier(with configuration: TunnelConfiguration) -> Int32 {
+        installLogCallback()
+
+        return configuration.executableCarrierURI.withCString { uriPointer in
+            phantom_start_layered_carrier_full(
+                uriPointer,
+                configuration.effectiveCarrierProxyPort,
+                configuration.fragmentEnabled ? 1 : 0,
+                configuration.fragmentSizeValue
+            )
+        }
+    }
+
+    private static func startPacketClient(
+        with configuration: TunnelConfiguration,
+        upstreamProxyOverride: String?
+    ) -> Int32 {
         let listenPort = configuration.listenPortValue ?? 0
+        let upstreamProxy = upstreamProxyOverride ?? configuration.normalizedUpstreamProxy
 
         return configuration.normalizedServerURL.withCString { serverURLPointer in
             configuration.normalizedSecret.withCString { secretPointer in
@@ -820,7 +1199,7 @@ enum TunnelRuntimeBridge {
                         withOptionalCString(configuration.normalizedHostOverride) { hostOverridePointer in
                             withOptionalCString(configuration.normalizedSNIOverride) { sniOverridePointer in
                                 withOptionalCString(configuration.normalizedObfsKey) { obfsKeyPointer in
-                                    withOptionalCString(configuration.normalizedUpstreamProxy) { upstreamProxyPointer in
+                                    withOptionalCString(upstreamProxy) { upstreamProxyPointer in
                                         phantom_start_full(
                                             serverURLPointer,
                                             secretPointer,

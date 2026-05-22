@@ -13,7 +13,8 @@
 #      failure → that's the "alive mode" you asked for; no nginx needed.
 #   5. Starts the service on port 80 (HTTP/WS/Meek, dual-stack v4/v6),
 #      8443 (OBFS TCP), and 443 (QUIC UDP).
-#   6. Prints the secrets and the snippet you need to paste into
+#   6. Starts a private Psiphon OSSH server on port 9999 for Psiphon Escape.
+#   7. Prints the secrets and the snippet you need to paste into
 #      packet-android/.../TunnelModels.kt on your laptop.
 #
 # Safe to re-run: secrets are regenerated only if /root/packet-secrets.env
@@ -30,6 +31,7 @@ REPO_DIR="${REPO_DIR:-$(pwd)}"
 WS_PORT="${WS_PORT:-80}"
 OBFS_PORT="${OBFS_PORT:-8443}"
 QUIC_PORT="${QUIC_PORT:-443}"
+PSIPHON_PORT="${PSIPHON_PORT:-9999}"
 SECRETS_FILE="/root/packet-secrets.env"
 
 if [[ ! -f "$REPO_DIR/Cargo.toml" ]] || [[ ! -d "$REPO_DIR/packet-server" ]]; then
@@ -41,7 +43,7 @@ fi
 echo "═══════════════════════════════════════════════════════════"
 echo "  phantom-server VPS setup"
 echo "  Repo  : $REPO_DIR"
-echo "  Ports : WS/Meek=$WS_PORT  OBFS-TCP=$OBFS_PORT  QUIC-UDP=$QUIC_PORT"
+echo "  Ports : WS/Meek=$WS_PORT  OBFS-TCP=$OBFS_PORT  QUIC-UDP=$QUIC_PORT  Psiphon-OSSH=$PSIPHON_PORT"
 echo "═══════════════════════════════════════════════════════════"
 
 # ── 1. Secrets (preserve if already deployed) ─────────────────────
@@ -62,6 +64,7 @@ OBFS_KEY=$OBFS_KEY
 WS_PORT=$WS_PORT
 OBFS_PORT=$OBFS_PORT
 QUIC_PORT=$QUIC_PORT
+PSIPHON_PORT=$PSIPHON_PORT
 EOF
   echo "       → saved to $SECRETS_FILE (mode 600)"
 fi
@@ -70,12 +73,15 @@ fi
 if ! grep -q '^QUIC_PORT=' "$SECRETS_FILE"; then
   echo "QUIC_PORT=$QUIC_PORT" >> "$SECRETS_FILE"
 fi
+if ! grep -q '^PSIPHON_PORT=' "$SECRETS_FILE"; then
+  echo "PSIPHON_PORT=$PSIPHON_PORT" >> "$SECRETS_FILE"
+fi
 
 # ── 2. Build deps + Rust ──────────────────────────────────────────
 echo "[2/5] Installing build deps + Rust if missing …"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq build-essential pkg-config libssl-dev curl ca-certificates >/dev/null
+apt-get install -y -qq build-essential pkg-config libssl-dev curl ca-certificates git openssl >/dev/null
 if ! command -v cargo >/dev/null 2>&1 && [[ ! -x /root/.cargo/bin/cargo ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --profile minimal --default-toolchain stable
@@ -119,19 +125,58 @@ UNIT
 systemctl daemon-reload
 systemctl enable phantom-server >/dev/null 2>&1 || true
 
+# ── 4b. Private Psiphon OSSH server ───────────────────────────────
+echo "[4b/5] Installing private Psiphon OSSH service …"
+PSIPHON_SCRIPT="$REPO_DIR/packet-android/scripts/psiphon-core-lab.sh"
+PSIPHON_SERVER_CONFIG="$REPO_DIR/packet-android/.psiphon-core-lab/server/psiphond.config"
+PSIPHON_CLIENT_CONFIG="$REPO_DIR/packet-android/.psiphon-core-lab/client/client.config"
+if [[ ! -x "$REPO_DIR/packet-android/.psiphon-core-lab/psiphon-tunnel-core-binaries/psiphond/psiphond" ]]; then
+  bash "$PSIPHON_SCRIPT" fetch
+fi
+PSIPHON_PUBLIC_IP="$(curl -4 -s --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')"
+if [[ ! -f "$PSIPHON_SERVER_CONFIG" || ! -f "$PSIPHON_CLIENT_CONFIG" ]]; then
+  PUBLIC_IP="$PSIPHON_PUBLIC_IP" PORT="$PSIPHON_PORT" PROTOCOL=OSSH bash "$PSIPHON_SCRIPT" generate-server
+fi
+
+cat > /etc/systemd/system/packet-psiphond.service <<UNIT
+[Unit]
+Description=Packet private Psiphon OSSH server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=$SECRETS_FILE
+WorkingDirectory=$REPO_DIR
+ExecStart=/bin/bash $PSIPHON_SCRIPT run-server
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable packet-psiphond >/dev/null 2>&1 || true
+
 # Open UFW only if it's the active firewall. Default VPSServer images leave
 # UFW off, so this is a no-op there.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
   ufw allow "$WS_PORT/tcp"   || true
   ufw allow "$OBFS_PORT/tcp" || true
   ufw allow "$QUIC_PORT/udp" || true
+  ufw allow "$PSIPHON_PORT/tcp" || true
 fi
 
 # ── 5. Start + report ─────────────────────────────────────────────
 echo "[5/5] Starting phantom-server …"
 systemctl restart phantom-server
+systemctl restart packet-psiphond
 sleep 2
 systemctl --no-pager --full status phantom-server | sed -n '1,18p' || true
+systemctl --no-pager --full status packet-psiphond | sed -n '1,18p' || true
 
 PUBLIC_IP4="$(curl -4 -s --max-time 5 https://api.ipify.org || echo "?")"
 PUBLIC_IP6="$(curl -6 -s --max-time 5 https://api64.ipify.org || echo "")"
@@ -145,18 +190,28 @@ echo "  Public IPv4 : ${PUBLIC_IP4}"
 echo "  WS/Meek port: $WS_PORT/tcp"
 echo "  OBFS port   : $OBFS_PORT/tcp"
 echo "  QUIC port   : $QUIC_PORT/udp"
+echo "  Psiphon OSSH: $PSIPHON_PORT/tcp"
 echo "  Secret      : $PHANTOM_SECRET"
 echo "  OBFS key    : $OBFS_KEY"
 echo "  Secrets file: $SECRETS_FILE"
+echo "  Psiphon cfg : $PSIPHON_CLIENT_CONFIG"
 echo
 echo "  Smoke tests (run from anywhere):"
 echo "    curl -sS http://${PUBLIC_IP4}:${WS_PORT}/api/v1/health"
 echo "    curl -sS http://${PUBLIC_IP4}:${WS_PORT}/ | head -n 5"
+echo "    nc -vz ${PUBLIC_IP4} ${PSIPHON_PORT}"
 echo "    nc -vu -w2 ${PUBLIC_IP4} ${QUIC_PORT}   # UDP reachability only; no HTTP output expected"
 echo
 echo "  Tail logs:    journalctl -u phantom-server -f -n 50"
+echo "                journalctl -u packet-psiphond -f -n 50"
 echo "  Restart:      systemctl restart phantom-server"
+echo "                systemctl restart packet-psiphond"
 echo "  Stop:         systemctl stop phantom-server"
+echo "                systemctl stop packet-psiphond"
+echo
+echo "  If packet-psiphond generated a new Psiphon server entry, copy it back:"
+echo "    scp root@${PUBLIC_IP4}:${PSIPHON_CLIENT_CONFIG} packet-android/.psiphon-core-lab/client/client.config"
+echo "    bash packet-android/scripts/psiphon-core-lab.sh install-client-asset"
 echo
 echo "  On your laptop, paste these into"
 echo "  packet-android/app/src/main/java/com/resolo/packet/TunnelModels.kt:"

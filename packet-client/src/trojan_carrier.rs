@@ -44,6 +44,7 @@ type CarrierWsStream = WebSocketStream<CarrierTlsStream>;
 
 #[derive(Clone, Debug)]
 pub struct TrojanCarrierConfig {
+    pub protocol: CarrierProtocol,
     pub endpoint: TrojanEndpoint,
     pub fragment_tls_hello: bool,
     pub fragment_size_hint: usize,
@@ -51,11 +52,40 @@ pub struct TrojanCarrierConfig {
 
 impl TrojanCarrierConfig {
     pub fn from_uri(uri: &str) -> Result<Self, String> {
+        let endpoint = TrojanEndpoint::parse(uri)?;
         Ok(Self {
-            endpoint: TrojanEndpoint::parse(uri)?,
+            protocol: endpoint.protocol,
+            endpoint,
             fragment_tls_hello: true,
             fragment_size_hint: 100,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CarrierProtocol {
+    Trojan,
+    Vless,
+}
+
+impl CarrierProtocol {
+    fn from_scheme(scheme: &str) -> Result<Self, String> {
+        match scheme.to_ascii_lowercase().as_str() {
+            "trojan" => Ok(Self::Trojan),
+            "vless" => Ok(Self::Vless),
+            "vmess" => Err("VMess/vmess:// was detected, but VMess AEAD is not bundled in the embedded Packet engine yet. Use vless:// or trojan:// for the local carrier.".to_string()),
+            other => Err(format!(
+                "DirectSock carrier URI must start with trojan:// or vless://, got {}://",
+                other
+            )),
+        }
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match self {
+            Self::Trojan => "Trojan",
+            Self::Vless => "VLESS",
+        }
     }
 }
 
@@ -92,6 +122,7 @@ impl TrojanCarrierTransport {
 
 #[derive(Clone, Debug)]
 pub struct TrojanEndpoint {
+    pub protocol: CarrierProtocol,
     pub password: String,
     pub connect_host: String,
     pub connect_port: u16,
@@ -107,20 +138,25 @@ pub struct TrojanEndpoint {
 
 impl TrojanEndpoint {
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let url = Url::parse(raw).map_err(|error| format!("invalid Trojan URI: {}", error))?;
-        if url.scheme() != "trojan" {
-            return Err("DirectSock URI must use trojan://".to_string());
+        let raw = raw.trim();
+        if raw.starts_with('{') {
+            return Err("V2Ray JSON config was detected. Paste the vless:// outbound URI for this embedded carrier; full V2Ray JSON execution is not bundled yet.".to_string());
         }
+        let url = Url::parse(raw).map_err(|error| format!("invalid carrier URI: {}", error))?;
+        let protocol = CarrierProtocol::from_scheme(url.scheme())?;
 
         let password = url.username().trim().to_string();
         if password.is_empty() {
-            return Err("Trojan URI is missing the password/user component".to_string());
+            return Err(format!("{} URI is missing the user component", protocol.label()));
+        }
+        if protocol == CarrierProtocol::Vless {
+            parse_uuid_bytes(&password).map_err(|error| format!("invalid VLESS UUID: {}", error))?;
         }
 
         let connect_host = url
             .host_str()
             .filter(|host| !host.trim().is_empty())
-            .ok_or_else(|| "Trojan URI is missing the edge host".to_string())?
+            .ok_or_else(|| format!("{} URI is missing the edge host", protocol.label()))?
             .to_string();
         let connect_port = url.port().unwrap_or(443);
 
@@ -166,7 +202,8 @@ impl TrojanEndpoint {
         let use_tls = match security.as_str() {
             "tls" => true,
             "none" | "http" | "plaintext" => false,
-            _ => return Err("DirectSock Trojan URI must use security=tls or security=none".to_string()),
+            "reality" => return Err("VLESS Reality was detected. Packet's embedded carrier supports VLESS TCP/WS over TLS or plaintext, not Reality yet.".to_string()),
+            _ => return Err(format!("{} URI must use security=tls or security=none", protocol.label())),
         };
 
         let host = query_host
@@ -198,6 +235,7 @@ impl TrojanEndpoint {
         }
 
         Ok(Self {
+            protocol,
             password,
             connect_host,
             connect_port,
@@ -367,7 +405,8 @@ pub async fn run_carrier_proxy(
         .map(|addr| addr.to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string());
     info!(
-        "[carrier] DirectSock Trojan {} TLS mixed HTTP/SOCKS proxy listening on {} -> {} host={} sni={} path={} fp={} alpn={} upstream={}",
+        "[carrier] DirectSock {} {} TLS mixed HTTP/SOCKS proxy listening on {} -> {} host={} sni={} path={} fp={} alpn={} upstream={}",
+        config.protocol.label(),
         config.endpoint.transport.label(),
         local_addr,
         config.endpoint.connect_addr(),
@@ -442,13 +481,14 @@ async fn handle_proxy_connection(
     let request = read_http_proxy_request(&mut local, first_byte[0]).await?;
     increment_runtime_total_streams();
     info!(
-        "[carrier] HTTP proxy {} {} via DirectSock",
+        "[carrier] HTTP proxy {} {} via DirectSock {}",
         if request.is_connect {
             "CONNECT"
         } else {
             "FORWARD"
         },
-        request.destination
+        request.destination,
+        config.protocol.label()
     );
 
     let mut remote = match connect_trojan_remote(&config).await {
@@ -461,12 +501,12 @@ async fn handle_proxy_connection(
         }
     };
     set_runtime_state("connecting");
-    if let Err(error) =
-        send_trojan_connect(&mut remote, &config.endpoint.password, &request.destination).await
-    {
+    if let Err(error) = send_carrier_connect(&mut remote, &config, &request.destination).await {
         let detail = format!(
-            "DirectSock Trojan CONNECT to {} failed: {}",
-            request.destination, error
+            "DirectSock {} CONNECT to {} failed: {}",
+            config.protocol.label(),
+            request.destination,
+            error
         );
         set_runtime_last_error(&detail);
         write_http_proxy_failure(&mut local, &detail).await?;
@@ -489,7 +529,7 @@ async fn handle_proxy_connection(
         .await?;
     }
 
-    let result = pump_proxy(local, remote).await;
+    let result = pump_proxy(local, remote, config.protocol).await;
     decrement_runtime_active_streams();
     result
 }
@@ -604,7 +644,11 @@ async fn handle_socks5_connection(
         Ok(destination) => destination,
         Err(error) => return Err(error),
     };
-    info!("[carrier] SOCKS5 CONNECT {} via DirectSock", destination);
+    info!(
+        "[carrier] SOCKS5 CONNECT {} via DirectSock {}",
+        destination,
+        config.protocol.label()
+    );
     increment_runtime_total_streams();
 
     let mut remote = match connect_trojan_remote(&config).await {
@@ -616,9 +660,7 @@ async fn handle_socks5_connection(
         }
     };
     set_runtime_state("connecting");
-    if let Err(error) =
-        send_trojan_connect(&mut remote, &config.endpoint.password, &destination).await
-    {
+    if let Err(error) = send_carrier_connect(&mut remote, &config, &destination).await {
         let _ = send_socks5_reply(&mut local, 0x05).await;
         set_runtime_last_error(error.to_string());
         return Err(error);
@@ -627,7 +669,7 @@ async fn handle_socks5_connection(
     set_runtime_connected(None);
 
     send_socks5_reply(&mut local, 0x00).await?;
-    let result = pump_proxy(local, remote).await;
+    let result = pump_proxy(local, remote, config.protocol).await;
     decrement_runtime_active_streams();
     result
 }
@@ -1280,6 +1322,37 @@ async fn send_trojan_connect(
     Ok(())
 }
 
+async fn send_carrier_connect(
+    remote: &mut CarrierRemote,
+    config: &TrojanCarrierConfig,
+    destination: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match config.protocol {
+        CarrierProtocol::Trojan => {
+            send_trojan_connect(remote, &config.endpoint.password, destination).await
+        }
+        CarrierProtocol::Vless => {
+            send_vless_connect(remote, &config.endpoint.password, destination).await
+        }
+    }
+}
+
+async fn send_vless_connect(
+    remote: &mut CarrierRemote,
+    uuid: &str,
+    destination: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut payload = Vec::new();
+    payload.push(0x00); // VLESS version
+    payload.extend_from_slice(&parse_uuid_bytes(uuid)?);
+    payload.push(0x00); // addon length
+    payload.push(0x01); // TCP
+    payload.extend_from_slice(&encode_vless_address(destination)?);
+
+    send_carrier_payload(remote, payload, "carrier VLESS CONNECT send failed").await?;
+    Ok(())
+}
+
 async fn send_carrier_payload(
     remote: &mut CarrierRemote,
     payload: Vec<u8>,
@@ -1301,6 +1374,19 @@ async fn send_carrier_payload(
     Ok(())
 }
 
+fn parse_uuid_bytes(uuid: &str) -> Result<[u8; 16], String> {
+    let hex: String = uuid.chars().filter(|ch| *ch != '-').collect();
+    if hex.len() != 32 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("expected UUID format xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx".to_string());
+    }
+    let mut out = [0u8; 16];
+    for index in 0..16 {
+        out[index] = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
+            .map_err(|_| "UUID contains invalid hex".to_string())?;
+    }
+    Ok(out)
+}
+
 fn trojan_password_hash(password: &str) -> String {
     let digest = Sha224::digest(password.as_bytes());
     to_lower_hex(&digest)
@@ -1314,6 +1400,35 @@ fn to_lower_hex(bytes: &[u8]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+fn encode_vless_address(destination: &str) -> Result<Vec<u8>, String> {
+    let (host, port) = split_destination(destination)?;
+    let mut out = Vec::new();
+    out.extend_from_slice(&port.to_be_bytes());
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(ipv4) => {
+                out.push(0x01);
+                out.extend_from_slice(&ipv4.octets());
+            }
+            IpAddr::V6(ipv6) => {
+                out.push(0x03);
+                out.extend_from_slice(&ipv6.octets());
+            }
+        }
+    } else {
+        let host_bytes = host.as_bytes();
+        if host_bytes.len() > u8::MAX as usize {
+            return Err("destination hostname is too long for VLESS address".to_string());
+        }
+        out.push(0x02);
+        out.push(host_bytes.len() as u8);
+        out.extend_from_slice(host_bytes);
+    }
+
+    Ok(out)
 }
 
 fn encode_trojan_address(destination: &str) -> Result<Vec<u8>, String> {
@@ -1375,19 +1490,54 @@ fn split_destination(destination: &str) -> Result<(String, u16), String> {
     Ok((host.to_string(), port))
 }
 
+fn strip_vless_response_header(mut bytes: Vec<u8>) -> Result<Vec<u8>, std::io::Error> {
+    if bytes.len() < 2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "VLESS response header is truncated",
+        ));
+    }
+    let addon_len = bytes[1] as usize;
+    let header_len = 2 + addon_len;
+    if bytes.len() < header_len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "VLESS response addon header is truncated",
+        ));
+    }
+    bytes.drain(..header_len);
+    Ok(bytes)
+}
+
+async fn consume_vless_response_header<R>(reader: &mut R) -> Result<(), std::io::Error>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut header = [0u8; 2];
+    reader.read_exact(&mut header).await?;
+    let addon_len = header[1] as usize;
+    if addon_len > 0 {
+        let mut addon = vec![0u8; addon_len];
+        reader.read_exact(&mut addon).await?;
+    }
+    Ok(())
+}
+
 async fn pump_proxy(
     local: TcpStream,
     remote: CarrierRemote,
+    protocol: CarrierProtocol,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match remote {
-        CarrierRemote::WebSocket(ws) => pump_ws_proxy(local, ws).await,
-        CarrierRemote::Tcp(tls) => pump_tcp_proxy(local, tls).await,
+        CarrierRemote::WebSocket(ws) => pump_ws_proxy(local, ws, protocol).await,
+        CarrierRemote::Tcp(tls) => pump_tcp_proxy(local, tls, protocol).await,
     }
 }
 
 async fn pump_ws_proxy(
     mut local: TcpStream,
     remote: CarrierWsStream,
+    protocol: CarrierProtocol,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut ws_sender, mut ws_receiver) = remote.split();
     let (mut local_read, mut local_write) = local.split();
@@ -1409,17 +1559,27 @@ async fn pump_ws_proxy(
     };
 
     let remote_to_local = async {
+        let mut vless_response_header_pending = protocol == CarrierProtocol::Vless;
         while let Some(message) = ws_receiver.next().await {
             match message
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error))?
             {
-                Message::Binary(bytes) => {
+                Message::Binary(mut bytes) => {
+                    if vless_response_header_pending {
+                        vless_response_header_pending = false;
+                        bytes = strip_vless_response_header(bytes)?;
+                    }
                     add_runtime_bytes_down(bytes.len() as u64);
                     local_write.write_all(&bytes).await?;
                 }
                 Message::Text(text) => {
-                    add_runtime_bytes_down(text.len() as u64);
-                    local_write.write_all(text.as_bytes()).await?;
+                    let mut bytes = text.into_bytes();
+                    if vless_response_header_pending {
+                        vless_response_header_pending = false;
+                        bytes = strip_vless_response_header(bytes)?;
+                    }
+                    add_runtime_bytes_down(bytes.len() as u64);
+                    local_write.write_all(&bytes).await?;
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
                 Message::Close(_) => break,
@@ -1440,6 +1600,7 @@ async fn pump_ws_proxy(
 async fn pump_tcp_proxy(
     mut local: TcpStream,
     remote: CarrierTlsStream,
+    protocol: CarrierProtocol,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (mut remote_read, mut remote_write) = tokio::io::split(remote);
     let (mut local_read, mut local_write) = local.split();
@@ -1459,6 +1620,9 @@ async fn pump_tcp_proxy(
     };
 
     let remote_to_local = async {
+        if protocol == CarrierProtocol::Vless {
+            consume_vless_response_header(&mut remote_read).await?;
+        }
         let mut buffer = [0u8; 16 * 1024];
         loop {
             let n = remote_read.read(&mut buffer).await?;
@@ -1484,7 +1648,8 @@ async fn pump_tcp_proxy(
 mod tests {
     use super::{
         encode_trojan_address, read_socks5_connect_request, trojan_password_hash,
-        CarrierUpstreamAuth, CarrierUpstreamProxy, TrojanCarrierTransport, TrojanEndpoint,
+        CarrierProtocol, CarrierUpstreamAuth, CarrierUpstreamProxy, TrojanCarrierTransport,
+        TrojanEndpoint,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -1524,6 +1689,31 @@ mod tests {
             endpoint.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
+    }
+
+    #[test]
+    fn parses_vless_tcp_plain_uri() {
+        let endpoint = TrojanEndpoint::parse(
+            "vless://86d31821-a522-42ca-b92c-19f50f6fbafe@example.com:443?type=tcp&encryption=none&security=none#plain",
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.protocol, CarrierProtocol::Vless);
+        assert_eq!(endpoint.password, "86d31821-a522-42ca-b92c-19f50f6fbafe");
+        assert_eq!(endpoint.connect_host, "example.com");
+        assert_eq!(endpoint.connect_port, 443);
+        assert_eq!(endpoint.transport, TrojanCarrierTransport::Tcp);
+        assert!(!endpoint.use_tls);
+    }
+
+    #[test]
+    fn routes_vless_reality_out_of_embedded_carrier() {
+        let error = TrojanEndpoint::parse(
+            "vless://86d31821-a522-42ca-b92c-19f50f6fbafe@35.254.76.153:443?type=tcp&encryption=none&security=reality&pbk=A_m5zPEmi1avKznvYQ5DwI8_Lc8EknEjoTP4yYVwQk8&fp=chrome&sni=www.apple.com&sid=675d633f&spx=%2F#BridgeExit-wa3axgs5",
+        )
+        .unwrap_err();
+
+        assert!(error.contains("VLESS Reality"));
     }
 
     #[test]

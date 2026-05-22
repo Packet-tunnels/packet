@@ -49,7 +49,7 @@ object TunnelDiagnosticReport {
             appendLine("cdn_edge=${configuration.normalizedCdnEdge.ifBlank { "(empty)" }}")
             appendLine("host_override=${configuration.normalizedHostOverride.ifBlank { "(empty)" }}")
             appendLine("sni_override=${configuration.normalizedSniOverride.ifBlank { "(empty)" }}")
-            appendLine("trojan_carrier=${configuration.normalizedTrojanCarrierUri.ifBlank { "(empty)" }}")
+            appendLine("carrier_uri=${configuration.normalizedTrojanCarrierUri.ifBlank { "(empty)" }}")
             appendLine("carrier_proxy_port=${configuration.carrierProxyPortValue}")
             appendLine("uses_cdn=${configuration.usesCdn}")
             appendLine("secret=${redactSecret(configuration.normalizedSecret)}")

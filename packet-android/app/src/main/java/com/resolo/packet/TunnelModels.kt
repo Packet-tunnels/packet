@@ -62,9 +62,9 @@ enum class TunnelState(val title: String) {
 object PacketDefaultProfiles {
     const val CHAIN_NAME = "Packet Chain"
     const val PSIPHON_CHAIN_NAME = "Psiphon Escape"
-    const val CHAIN_SERVER_URL = "http://114.29.236.118:80"
+    const val CHAIN_SERVER_URL = "http://185.167.98.98:80"
     const val CHAIN_SECRET = "4ff204d5baf2f12406a45a4b2793c508f2cec2dfab865f9c8904eb5cec2024b2"
-    const val CHAIN_EDGE = "114.29.236.118:80"
+    const val CHAIN_EDGE = "185.167.98.98:80"
     const val CHAIN_OBFS_KEY = "1dbe8442ad975fb80a497d0cda4a547844cb81aefec8520e5a15055634585ee7"
     const val CHAIN_TROJAN_URI =
         "trojan://humanity@172.64.152.23:80?path=%2Fassignment&security=none" +
@@ -122,9 +122,9 @@ object PacketDefaultProfiles {
     // cannot inject the reset that kills every TCP+TLS first hop. This is
     // the escape the trojan/CF chain structurally cannot achieve.
     const val QUIC_NAME = "Packet QUIC"
-    const val QUIC_SERVER_URL = "http://114.29.236.118:80"
+    const val QUIC_SERVER_URL = "http://185.167.98.98:80"
     // cdnEdge is the actual UDP dial target — the server's QUIC listener.
-    const val QUIC_EDGE = "114.29.236.118:443"
+    const val QUIC_EDGE = "185.167.98.98:443"
 
     fun quicConfiguration(): TunnelConfiguration {
         return TunnelConfiguration(
@@ -200,6 +200,30 @@ data class TunnelConfiguration(
     val normalizedTrojanCarrierUri: String
         get() = trojanCarrierUri.trim()
 
+    val executableCarrierUri: String
+        get() = extractVlessUriFromV2RayJson(normalizedTrojanCarrierUri) ?: normalizedTrojanCarrierUri
+
+    val carrierProtocolLabel: String
+        get() = when {
+            usesRealityCarrier -> if (normalizedTrojanCarrierUri.trimStart().startsWith("{")) "V2Ray VLESS Reality" else "VLESS Reality"
+            executableCarrierUri.startsWith("vless://", ignoreCase = true) -> "VLESS"
+            normalizedTrojanCarrierUri.startsWith("vmess://", ignoreCase = true) -> "VMess"
+            normalizedTrojanCarrierUri.startsWith("{") -> "V2Ray JSON"
+            normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true) -> "Trojan"
+            else -> "Carrier"
+        }
+
+    val isSupportedCarrierUri: Boolean
+        get() = executableCarrierUri.startsWith("trojan://", ignoreCase = true) ||
+            executableCarrierUri.startsWith("vless://", ignoreCase = true)
+
+    val usesRealityCarrier: Boolean
+        get() = executableCarrierUri.startsWith("vless://", ignoreCase = true) &&
+            runCatching {
+                Uri.parse(executableCarrierUri).getQueryParameter("security")
+                    .equals("reality", ignoreCase = true)
+            }.getOrDefault(false)
+
     private val parsedServerUri: Uri?
         get() = runCatching { Uri.parse(normalizedServerUrl) }.getOrNull()
 
@@ -267,9 +291,9 @@ data class TunnelConfiguration(
     val ingressLabel: String
         get() = when {
             usesPrivateRelay -> "Private Starlink relay"
-            usesPsiphonChain -> "Trojan + Psiphon + Packet"
-            usesPacketChain -> "Trojan + Packet"
-            usesCustomCarrier -> "DirectSock"
+            usesPsiphonChain -> "${carrierProtocolLabel} + Psiphon + Packet"
+            usesPacketChain -> "${carrierProtocolLabel} + Packet"
+            usesCustomCarrier -> carrierProtocolLabel
             transportMode == TunnelTransportMode.OBFS -> "Obfs raw TCP"
             transportMode == TunnelTransportMode.MEEK -> "Meek HTTP"
             transportMode == TunnelTransportMode.STEALTH -> "Stealth TLS"
@@ -396,7 +420,7 @@ data class TunnelConfiguration(
 
     private val carrierEndpointHost: String
         get() {
-            return runCatching { Uri.parse(normalizedTrojanCarrierUri).host }
+            return runCatching { Uri.parse(executableCarrierUri).host }
                 .getOrNull()
                 ?.takeIf { it.isNotBlank() }
                 ?: "Unavailable"
@@ -404,7 +428,7 @@ data class TunnelConfiguration(
 
     private val carrierEndpointPort: Int
         get() {
-            return runCatching { Uri.parse(normalizedTrojanCarrierUri).port }
+            return runCatching { Uri.parse(executableCarrierUri).port }
                 .getOrNull()
                 ?.takeIf { it > 0 }
                 ?: 443
@@ -451,10 +475,10 @@ data class TunnelConfiguration(
         get() {
             if (usesCustomCarrier) {
                 if (normalizedTrojanCarrierUri.isEmpty()) {
-                    return "Trojan URI is required for DirectSock mode."
+                    return "Carrier URI is required for DirectSock mode."
                 }
-                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
-                    return "DirectSock URI must start with trojan://."
+                if (!isSupportedCarrierUri) {
+                    return "DirectSock carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "DirectSock local port must be 1024-65535."
@@ -464,10 +488,10 @@ data class TunnelConfiguration(
 
             if (usesPacketChain) {
                 if (normalizedTrojanCarrierUri.isEmpty()) {
-                    return "Trojan URI is required for Packet Chain mode."
+                    return "Carrier URI is required for Packet Chain mode."
                 }
-                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
-                    return "Packet Chain Trojan URI must start with trojan://."
+                if (!isSupportedCarrierUri) {
+                    return "Packet Chain carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "Packet Chain carrier port must be 1024-65535."
@@ -484,10 +508,10 @@ data class TunnelConfiguration(
 
             if (usesPsiphonChain) {
                 if (normalizedTrojanCarrierUri.isEmpty()) {
-                    return "Trojan URI is required for Psiphon Chain mode."
+                    return "Carrier URI is required for Psiphon Chain mode."
                 }
-                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
-                    return "Psiphon Chain Trojan URI must start with trojan://."
+                if (!isSupportedCarrierUri) {
+                    return "Psiphon Chain carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "Psiphon Chain carrier port must be 1024-65535."
@@ -621,8 +645,132 @@ data class TunnelConfiguration(
                 carrierProxyPort = json.optString("carrier_proxy_port", "10808"),
             )
         }
+
+        fun importedFromText(raw: String): ImportedTunnelConfiguration? {
+            val carrierText = firstImportableCarrierText(raw) ?: return null
+            val configuration = TunnelConfiguration(
+                stackMode = TunnelStackMode.CUSTOM_TROJAN_CARRIER,
+                trojanCarrierUri = carrierText,
+                carrierProxyPort = "10808",
+            )
+            if (configuration.validationError != null) return null
+
+            return ImportedTunnelConfiguration(
+                name = importedCarrierName(configuration),
+                configuration = configuration,
+            )
+        }
+
+        private fun firstImportableCarrierText(raw: String): String? {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return null
+
+            if (trimmed.startsWith("{") && extractVlessUriFromV2RayJson(trimmed) != null) {
+                return trimmed
+            }
+
+            val match = Regex("""(?i)\b(?:trojan|vless)://\S+""")
+                .find(trimmed)
+                ?.value
+                ?.trimEnd { character ->
+                    character.isWhitespace() ||
+                        character == '"' ||
+                        character == '\'' ||
+                        character == ',' ||
+                        character == '.' ||
+                        character == ';' ||
+                        character == ')' ||
+                        character == ']'
+                }
+                ?: return null
+
+            return match.takeIf {
+                it.startsWith("trojan://", ignoreCase = true) ||
+                    it.startsWith("vless://", ignoreCase = true)
+            }
+        }
+
+        private fun importedCarrierName(configuration: TunnelConfiguration): String {
+            val executableUri = configuration.executableCarrierUri
+            val uri = runCatching { Uri.parse(executableUri) }.getOrNull()
+            val fragment = uri?.fragment?.trim().orEmpty()
+            val host = uri?.host?.trim().orEmpty()
+            val label = configuration.carrierProtocolLabel
+
+            return when {
+                fragment.isNotEmpty() -> "$label - $fragment"
+                host.isNotEmpty() -> "$label - $host"
+                else -> label
+            }
+        }
+
+        private fun extractVlessUriFromV2RayJson(raw: String): String? {
+            if (!raw.trimStart().startsWith("{")) return null
+            return runCatching {
+                val root = JSONObject(raw)
+                val outbounds = root.optJSONArray("outbounds") ?: return@runCatching null
+                for (index in 0 until outbounds.length()) {
+                    val outbound = outbounds.optJSONObject(index) ?: continue
+                    if (!outbound.optString("protocol").equals("vless", ignoreCase = true)) continue
+
+                    val settings = outbound.optJSONObject("settings") ?: continue
+                    val vnext = settings.optJSONArray("vnext")?.optJSONObject(0) ?: continue
+                    val address = vnext.optString("address").trim()
+                    val port = vnext.optInt("port", 443).takeIf { it in 1..65535 } ?: 443
+                    val user = vnext.optJSONArray("users")?.optJSONObject(0) ?: continue
+                    val id = user.optString("id").trim()
+                    if (address.isEmpty() || id.isEmpty()) continue
+
+                    val stream = outbound.optJSONObject("streamSettings")
+                    val network = stream?.optString("network")?.trim().orEmpty().ifBlank { "tcp" }
+                    val security = stream?.optString("security")?.trim().orEmpty().ifBlank { "tls" }
+                    val ws = stream?.optJSONObject("wsSettings")
+                    val path = ws?.optString("path")?.trim().orEmpty()
+                    val host = ws?.optJSONObject("headers")?.optString("Host")?.trim().orEmpty()
+                    val tls = stream?.optJSONObject("tlsSettings")
+                    val reality = stream?.optJSONObject("realitySettings")
+                    val sni = if (security.equals("reality", ignoreCase = true)) {
+                        reality?.optString("serverName")?.trim().orEmpty()
+                    } else {
+                        tls?.optString("serverName")?.trim().orEmpty()
+                    }
+                    val fingerprint = reality?.optString("fingerprint")?.trim().orEmpty()
+                    val publicKey = reality?.optString("publicKey")?.trim().orEmpty()
+                    val shortId = reality?.optString("shortId")?.trim().orEmpty()
+                    val spiderX = reality?.optString("spiderX")?.trim().orEmpty()
+                    val encryption = user.optString("encryption").trim().ifBlank { "none" }
+                    val flow = user.optString("flow").trim()
+
+                    return@runCatching Uri.Builder()
+                        .scheme("vless")
+                        .encodedAuthority("$id@$address:$port")
+                        .appendQueryParameter("type", network)
+                        .appendQueryParameter("encryption", encryption)
+                        .appendQueryParameter("security", security)
+                        .apply {
+                            if (path.isNotEmpty()) appendQueryParameter("path", path)
+                            if (host.isNotEmpty()) appendQueryParameter("host", host)
+                            if (sni.isNotEmpty()) appendQueryParameter("sni", sni)
+                            if (fingerprint.isNotEmpty()) appendQueryParameter("fp", fingerprint)
+                            if (publicKey.isNotEmpty()) appendQueryParameter("pbk", publicKey)
+                            if (shortId.isNotEmpty()) appendQueryParameter("sid", shortId)
+                            if (spiderX.isNotEmpty()) appendQueryParameter("spx", spiderX)
+                            if (flow.isNotEmpty()) appendQueryParameter("flow", flow)
+                            outbound.optString("tag").takeIf { it.isNotBlank() }?.let { fragment(it) }
+                        }
+                        .build()
+                        .toString()
+                }
+                null
+            }.getOrNull()
+        }
     }
 }
+
+data class ImportedTunnelConfiguration(
+    val name: String,
+    val configuration: TunnelConfiguration,
+)
 
 data class SavedTunnelConfiguration(
     val id: String = UUID.randomUUID().toString(),
@@ -639,9 +787,9 @@ data class SavedTunnelConfiguration(
         get() = if (configuration.usesCustomCarrier) {
             configuration.normalizedTrojanCarrierUri.ifBlank { "DirectSock not configured" }
         } else if (configuration.usesPacketChain) {
-            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Trojan missing" }} -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
+            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Carrier missing" }} -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
         } else if (configuration.usesPsiphonChain) {
-            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Trojan missing" }} -> Psiphon -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
+            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Carrier missing" }} -> Psiphon -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
         } else if (configuration.usesPrivateRelay) {
             "${configuration.normalizedServerUrl.ifBlank { "Private VPS missing" }} -> Starlink relay"
         } else {

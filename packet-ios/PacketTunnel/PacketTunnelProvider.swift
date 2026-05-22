@@ -34,6 +34,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             } catch {
                 NSLog("[PHANTOM] EXT: Failed to start tunnel: \(error.localizedDescription)")
                 SharedTunnelLogStore.append("[EXT] Failed to start packet tunnel: \(error.localizedDescription)")
+                PacketPsiphonCore.shared.stop()
                 TunnelRuntimeBridge.stopRustClient()
                 completionHandler(error)
             }
@@ -46,6 +47,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         listenPort = nil
         egressMetadata = .empty
+        PacketPsiphonCore.shared.stop()
         TunnelRuntimeBridge.stopRustClient()
         SharedTunnelLogStore.append("[EXT] Packet tunnel stop requested (\(reason.rawValue))")
         completionHandler()
@@ -105,7 +107,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let configuration = try loadConfiguration()
         let requestedPort = try requestedListenPort(from: configuration)
         let requestedPortLabel = requestedPort == 0 ? "auto" : "\(requestedPort)"
-        let localProxyLabel = configuration.usesCustomCarrier ? "DirectSock proxy" : "SOCKS5"
+        let localProxyLabel = configuration.usesCustomCarrier
+            ? "DirectSock proxy"
+            : configuration.usesPsiphonChain ? "Packet-over-Psiphon SOCKS5" : "SOCKS5"
 
         SharedTunnelLogStore.append("[EXT] Starting Rust tunnel core on 127.0.0.1:\(requestedPortLabel)")
         NSLog("[PHANTOM] EXT: Calling startRustClient for port request \(requestedPortLabel)")
@@ -115,7 +119,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let maxRetries = 5
 
         for attempt in 1...maxRetries {
-            result = TunnelRuntimeBridge.startRustClient(with: configuration)
+            result = try await startRuntime(for: configuration)
             NSLog("[PHANTOM] EXT: startRustClient attempt \(attempt)/\(maxRetries) returned \(result)")
             SharedTunnelLogStore.append("[EXT] Rust start attempt \(attempt)/\(maxRetries): code \(result)")
 
@@ -127,6 +131,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if result == -2, attempt < maxRetries {
                 // Port still held by previous extension process — wait for OS to reclaim it
                 SharedTunnelLogStore.append("[EXT] Port in use, retrying in 1s...")
+                PacketPsiphonCore.shared.stop()
+                TunnelRuntimeBridge.stopRustClient()
                 try await Task.sleep(nanoseconds: 1_000_000_000) // 1 second
                 continue
             }
@@ -186,8 +192,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let configuration = TunnelConfiguration(providerConfiguration: providerConfiguration)
 
         if configuration.usesCustomCarrier {
-            NSLog("[PHANTOM] EXT: Config - stack=directsock_trojan uri='\(configuration.normalizedTrojanCarrierURI)' localPort='\(configuration.carrierProxyPort)'")
-            SharedTunnelLogStore.append("[EXT] Config loaded: DirectSock=\(configuration.endpointHost):\(configuration.endpointPort) port=\(configuration.carrierProxyPort)")
+            NSLog("[PHANTOM] EXT: Config - stack=directsock carrier='\(configuration.carrierProtocolLabel)' uri='\(configuration.executableCarrierURI)' localPort='\(configuration.carrierProxyPort)'")
+            SharedTunnelLogStore.append("[EXT] Config loaded: \(configuration.carrierProtocolLabel)=\(configuration.endpointHost):\(configuration.endpointPort) port=\(configuration.carrierProxyPort)")
+        } else if configuration.usesPsiphonChain {
+            let upstreamLabel = configuration.normalizedUpstreamProxy.isEmpty ? "(dynamic)" : redactedProxy(configuration.normalizedUpstreamProxy)
+            NSLog("[PHANTOM] EXT: Config - stack=psiphon_chain carrier='\(configuration.endpointHost):\(configuration.endpointPort)' packetURL='\(configuration.normalizedServerURL)' upstream='\(upstreamLabel)'")
+            SharedTunnelLogStore.append("[EXT] Config loaded: Psiphon Chain carrier=\(configuration.endpointHost):\(configuration.endpointPort) packet=\(configuration.normalizedServerURL) upstream=\(upstreamLabel)")
+        } else if configuration.usesPacketChain {
+            NSLog("[PHANTOM] EXT: Config - stack=packet_chain carrier='\(configuration.endpointHost):\(configuration.endpointPort)' packetURL='\(configuration.normalizedServerURL)'")
+            SharedTunnelLogStore.append("[EXT] Config loaded: Packet Chain carrier=\(configuration.endpointHost):\(configuration.endpointPort) packet=\(configuration.normalizedServerURL)")
         } else {
             let upstreamLabel = configuration.normalizedUpstreamProxy.isEmpty ? "(none)" : redactedProxy(configuration.normalizedUpstreamProxy)
             NSLog("[PHANTOM] EXT: Config - URL='\(configuration.normalizedServerURL)' secretLen=\(configuration.normalizedSecret.count) port='\(configuration.listenPort)' transport=\(configuration.transportMode.title) upstream='\(upstreamLabel)'")
@@ -201,6 +214,41 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         return configuration
+    }
+
+    private func startRuntime(for configuration: TunnelConfiguration) async throws -> Int32 {
+        guard configuration.usesPsiphonChain else {
+            return TunnelRuntimeBridge.startRustClient(with: configuration)
+        }
+
+        let carrierPort = TunnelRuntimeBridge.startLayeredCarrier(with: configuration)
+        guard carrierPort > 0 else {
+            SharedTunnelLogStore.append(
+                "[EXT] ❌ DirectSock carrier failed before Psiphon chain (code \(carrierPort))"
+            )
+            return carrierPort
+        }
+
+        let psiphonUpstream = "http://127.0.0.1:\(carrierPort)"
+        SharedTunnelLogStore.append(
+            "[EXT] DirectSock carrier is ready on 127.0.0.1:\(carrierPort); starting Psiphon through it"
+        )
+
+        let psiphon = try await PacketPsiphonCore.shared.startLocalProxy(
+            upstreamProxyURL: psiphonUpstream,
+            requestedHTTPPort: PacketDefaultProfiles.psiphonLocalHTTPPort,
+            requestedSocksPort: PacketDefaultProfiles.psiphonLocalSocksPort
+        )
+
+        let packetUpstream = "http://127.0.0.1:\(psiphon.httpPort)"
+        SharedTunnelLogStore.append(
+            "[EXT] Psiphon HTTP proxy is ready on 127.0.0.1:\(psiphon.httpPort); starting Packet through Psiphon"
+        )
+
+        return TunnelRuntimeBridge.startRustClient(
+            with: configuration,
+            upstreamProxyOverride: packetUpstream
+        )
     }
 
     private func requestedListenPort(from configuration: TunnelConfiguration) throws -> UInt16 {
@@ -341,7 +389,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let startedAt = Date()
         let timeoutAt = startedAt.addingTimeInterval(300)
         var attempts = 0
-        let label = configuration.usesCustomCarrier ? "DirectSock" : "tunnel"
+        let label = configuration.usesCustomCarrier
+            ? "DirectSock"
+            : configuration.usesPsiphonChain ? "Packet Chain" : "tunnel"
         var lastProbe = InternetEgressProbeResult(
             succeeded: false,
             target: "none",
