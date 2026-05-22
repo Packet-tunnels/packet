@@ -11,3 +11,6 @@ packet-ios/.build
 packet-android/.gradle
 packet-android/build
 packet-android/app/build
+packet-android/.psiphon-core-lab
+packet-android/app/libs/psiphon-tunnel-core.aar
+packet-android/app/src/main/assets/psiphon/client.config

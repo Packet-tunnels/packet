@@ -80,7 +80,33 @@ object TunnelPreferences {
         val preferences = prefs(context)
         val savedConfigurations = loadSavedConfigurationsInternal(preferences)
         if (savedConfigurations.isNotEmpty()) {
-            val chainProfile = savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.CHAIN_NAME }?.let { existing ->
+            val psiphonProfile = savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.PSIPHON_CHAIN_NAME }?.let { existing ->
+                val refreshed = existing.copy(configuration = PacketDefaultProfiles.psiphonChainConfiguration())
+                val index = savedConfigurations.indexOfFirst { it.id == existing.id }
+                if (index >= 0 && savedConfigurations[index].configuration != refreshed.configuration) {
+                    savedConfigurations[index] = refreshed
+                    persistSavedConfigurations(preferences.edit(), savedConfigurations)
+                        .let { editor ->
+                            if (preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null) == refreshed.id) {
+                                mirrorLegacyConfiguration(editor, refreshed.configuration)
+                            } else {
+                                editor
+                            }
+                        }
+                        .apply()
+                }
+                refreshed
+            } ?: run {
+                val inserted = SavedTunnelConfiguration(
+                    name = PacketDefaultProfiles.PSIPHON_CHAIN_NAME,
+                    configuration = PacketDefaultProfiles.psiphonChainConfiguration(),
+                )
+                savedConfigurations.add(0, inserted)
+                persistSavedConfigurations(preferences.edit(), savedConfigurations).apply()
+                inserted
+            }
+
+            savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.CHAIN_NAME }?.let { existing ->
                 val refreshed = existing.copy(configuration = PacketDefaultProfiles.chainConfiguration())
                 val index = savedConfigurations.indexOfFirst { it.id == existing.id }
                 if (index >= 0 && savedConfigurations[index].configuration != refreshed.configuration) {
@@ -109,12 +135,30 @@ object TunnelPreferences {
                 inserted
             }
 
+            // Ensure the built-in Packet QUIC test profile also exists so
+            // the user has a one-tap UDP/443 escape to select.
+            if (savedConfigurations.none { it.name == PacketDefaultProfiles.QUIC_NAME }) {
+                savedConfigurations.add(
+                    SavedTunnelConfiguration(
+                        name = PacketDefaultProfiles.QUIC_NAME,
+                        configuration = PacketDefaultProfiles.quicConfiguration(),
+                    )
+                )
+                persistSavedConfigurations(preferences.edit(), savedConfigurations).apply()
+            }
+
             val selectedId = preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null)
+            val selectedEntry = savedConfigurations.firstOrNull { it.id == selectedId }
             if (selectedId == null || savedConfigurations.none { it.id == selectedId }) {
                 preferences.edit()
-                    .putString(KEY_SELECTED_CONFIGURATION_ID, chainProfile.id)
+                    .putString(KEY_SELECTED_CONFIGURATION_ID, psiphonProfile.id)
                     .apply()
-                mirrorLegacyConfiguration(preferences.edit(), chainProfile.configuration).apply()
+                mirrorLegacyConfiguration(preferences.edit(), psiphonProfile.configuration).apply()
+            } else if (selectedEntry?.name in setOf(PacketDefaultProfiles.CHAIN_NAME, PacketDefaultProfiles.QUIC_NAME)) {
+                preferences.edit()
+                    .putString(KEY_SELECTED_CONFIGURATION_ID, psiphonProfile.id)
+                    .apply()
+                mirrorLegacyConfiguration(preferences.edit(), psiphonProfile.configuration).apply()
             }
             return
         }
@@ -122,11 +166,26 @@ object TunnelPreferences {
         val legacyConfiguration = loadLegacyConfiguration(preferences)
         if (legacyConfiguration.isEmpty) {
             val defaultConfiguration = SavedTunnelConfiguration(
+                name = PacketDefaultProfiles.PSIPHON_CHAIN_NAME,
+                configuration = PacketDefaultProfiles.psiphonChainConfiguration(),
+            )
+            val chainConfiguration = SavedTunnelConfiguration(
                 name = PacketDefaultProfiles.CHAIN_NAME,
                 configuration = PacketDefaultProfiles.chainConfiguration(),
             )
+            val quicConfiguration = SavedTunnelConfiguration(
+                name = PacketDefaultProfiles.QUIC_NAME,
+                configuration = PacketDefaultProfiles.quicConfiguration(),
+            )
             preferences.edit()
-                .putString(KEY_SAVED_CONFIGURATIONS, JSONArray().put(defaultConfiguration.toJsonObject()).toString())
+                .putString(
+                    KEY_SAVED_CONFIGURATIONS,
+                    JSONArray()
+                        .put(defaultConfiguration.toJsonObject())
+                        .put(chainConfiguration.toJsonObject())
+                        .put(quicConfiguration.toJsonObject())
+                        .toString(),
+                )
                 .putString(KEY_SELECTED_CONFIGURATION_ID, defaultConfiguration.id)
                 .apply()
             return

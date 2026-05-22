@@ -37,7 +37,8 @@ enum class TunnelStackMode(val rawValue: Int, val title: String) {
     PACKET_NATIVE(0, "Packet Native"),
     CUSTOM_TROJAN_CARRIER(1, "DirectSock"),
     PACKET_CHAIN(2, "Packet Chain"),
-    PRIVATE_RELAY(3, "Private Relay");
+    PRIVATE_RELAY(3, "Private Relay"),
+    PSIPHON_CHAIN(4, "Psiphon Chain");
 
     companion object {
         fun fromRawValue(value: Int): TunnelStackMode {
@@ -60,13 +61,16 @@ enum class TunnelState(val title: String) {
 
 object PacketDefaultProfiles {
     const val CHAIN_NAME = "Packet Chain"
-    const val CHAIN_SERVER_URL = "http://185.127.19.211:80"
-    const val CHAIN_SECRET = "653925d13cce7b0fdf95ed34321b117947798b95bfedf91890168f2412e44b31"
-    const val CHAIN_EDGE = "185.127.19.211:80"
-    const val CHAIN_OBFS_KEY = "23cdd676a062e1174719a80975f34eda1e5c7f97a7ef8b5760b40055cc9f1519"
+    const val PSIPHON_CHAIN_NAME = "Psiphon Escape"
+    const val CHAIN_SERVER_URL = "http://114.29.236.118:80"
+    const val CHAIN_SECRET = "4ff204d5baf2f12406a45a4b2793c508f2cec2dfab865f9c8904eb5cec2024b2"
+    const val CHAIN_EDGE = "114.29.236.118:80"
+    const val CHAIN_OBFS_KEY = "1dbe8442ad975fb80a497d0cda4a547844cb81aefec8520e5a15055634585ee7"
     const val CHAIN_TROJAN_URI =
-        "trojan://humanity@172.64.152.23:443?path=%2Fassignment&security=tls" +
-            "&host=www.creationlong.org&type=ws&sni=www.creationlong.org&fp=chrome#%40InfoTech_VK"
+        "trojan://humanity@172.64.152.23:80?path=%2Fassignment&security=none" +
+            "&host=www.creationlong.org&type=ws#%40InfoTech_VK"
+    const val PSIPHON_LOCAL_HTTP_PORT = 18080
+    const val PSIPHON_LOCAL_SOCKS_PORT = 18081
 
     fun chainConfiguration(): TunnelConfiguration {
         return TunnelConfiguration(
@@ -88,6 +92,58 @@ object PacketDefaultProfiles {
             fragmentSize = "100",
             trojanCarrierUri = CHAIN_TROJAN_URI,
             carrierProxyPort = "10808",
+        )
+    }
+
+    fun psiphonChainConfiguration(): TunnelConfiguration {
+        return TunnelConfiguration(
+            stackMode = TunnelStackMode.PSIPHON_CHAIN,
+            serverUrl = CHAIN_SERVER_URL,
+            secret = CHAIN_SECRET,
+            listenPort = "",
+            cdnEdge = CHAIN_EDGE,
+            hostOverride = "",
+            sniOverride = "",
+            transportMode = TunnelTransportMode.AUTO,
+            obfsKey = CHAIN_OBFS_KEY,
+            upstreamProxy = "",
+            fragmentEnabled = true,
+            fragmentSize = "100",
+            trojanCarrierUri = CHAIN_TROJAN_URI,
+            carrierProxyPort = "10808",
+        )
+    }
+
+    // ── Packet QUIC: direct UDP/443 escape ─────────────────────────────
+    // No trojan, no Cloudflare, no TCP at all. The phantom tunnel runs
+    // inside a QUIC connection straight to our own server on UDP/443.
+    // QUIC datagrams are indistinguishable from HTTP/3 (YouTube, Meet,
+    // WhatsApp video) and — critically — UDP has no RST, so Iran's DPI
+    // cannot inject the reset that kills every TCP+TLS first hop. This is
+    // the escape the trojan/CF chain structurally cannot achieve.
+    const val QUIC_NAME = "Packet QUIC"
+    const val QUIC_SERVER_URL = "http://114.29.236.118:80"
+    // cdnEdge is the actual UDP dial target — the server's QUIC listener.
+    const val QUIC_EDGE = "114.29.236.118:443"
+
+    fun quicConfiguration(): TunnelConfiguration {
+        return TunnelConfiguration(
+            stackMode = TunnelStackMode.PACKET_NATIVE,
+            serverUrl = QUIC_SERVER_URL,
+            secret = CHAIN_SECRET,
+            listenPort = "",
+            cdnEdge = QUIC_EDGE,
+            hostOverride = "",
+            sniOverride = "",
+            transportMode = TunnelTransportMode.QUIC,
+            obfsKey = "",
+            upstreamProxy = "",
+            // QUIC has no TLS-ClientHello fragmentation concept; the QUIC
+            // Initial packet is already its own obfuscation surface.
+            fragmentEnabled = false,
+            fragmentSize = "0",
+            trojanCarrierUri = "",
+            carrierProxyPort = "",
         )
     }
 }
@@ -159,6 +215,9 @@ data class TunnelConfiguration(
     val usesPacketChain: Boolean
         get() = stackMode == TunnelStackMode.PACKET_CHAIN
 
+    val usesPsiphonChain: Boolean
+        get() = stackMode == TunnelStackMode.PSIPHON_CHAIN
+
     val usesPrivateRelay: Boolean
         get() = stackMode == TunnelStackMode.PRIVATE_RELAY
 
@@ -197,6 +256,7 @@ data class TunnelConfiguration(
     val usesAdvancedStart: Boolean
         get() = usesCustomCarrier ||
             usesPacketChain ||
+            usesPsiphonChain ||
             usesPrivateRelay ||
             usesCdn ||
             transportMode != TunnelTransportMode.AUTO ||
@@ -207,6 +267,7 @@ data class TunnelConfiguration(
     val ingressLabel: String
         get() = when {
             usesPrivateRelay -> "Private Starlink relay"
+            usesPsiphonChain -> "Trojan + Psiphon + Packet"
             usesPacketChain -> "Trojan + Packet"
             usesCustomCarrier -> "DirectSock"
             transportMode == TunnelTransportMode.OBFS -> "Obfs raw TCP"
@@ -247,6 +308,10 @@ data class TunnelConfiguration(
                 return carrierEndpointHost
             }
 
+            if (usesPsiphonChain) {
+                return carrierEndpointHost
+            }
+
             if (usesPrivateRelay) {
                 return parsedServerHost
             }
@@ -274,6 +339,10 @@ data class TunnelConfiguration(
                 return carrierEndpointHost
             }
 
+            if (usesPsiphonChain) {
+                return carrierEndpointHost
+            }
+
             if (usesPrivateRelay) {
                 return parsedServerHost
             }
@@ -292,6 +361,10 @@ data class TunnelConfiguration(
             }
 
             if (usesPacketChain) {
+                return carrierEndpointPort
+            }
+
+            if (usesPsiphonChain) {
                 return carrierEndpointPort
             }
 
@@ -350,6 +423,10 @@ data class TunnelConfiguration(
                 return PacketDefaultProfiles.CHAIN_NAME
             }
 
+            if (usesPsiphonChain) {
+                return PacketDefaultProfiles.PSIPHON_CHAIN_NAME
+            }
+
             if (usesPrivateRelay) {
                 return "Private Relay"
             }
@@ -400,6 +477,26 @@ data class TunnelConfiguration(
                 }
                 if (normalizedSecret.isEmpty()) {
                     return "Packet Chain shared secret is required."
+                }
+                cdnEdgeValidationError?.let { return it }
+                return null
+            }
+
+            if (usesPsiphonChain) {
+                if (normalizedTrojanCarrierUri.isEmpty()) {
+                    return "Trojan URI is required for Psiphon Chain mode."
+                }
+                if (!normalizedTrojanCarrierUri.startsWith("trojan://", ignoreCase = true)) {
+                    return "Psiphon Chain Trojan URI must start with trojan://."
+                }
+                if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
+                    return "Psiphon Chain carrier port must be 1024-65535."
+                }
+                if (normalizedServerUrl.isEmpty()) {
+                    return "Psiphon Chain Packet server URL is required."
+                }
+                if (normalizedSecret.isEmpty()) {
+                    return "Psiphon Chain Packet shared secret is required."
                 }
                 cdnEdgeValidationError?.let { return it }
                 return null
@@ -543,6 +640,8 @@ data class SavedTunnelConfiguration(
             configuration.normalizedTrojanCarrierUri.ifBlank { "DirectSock not configured" }
         } else if (configuration.usesPacketChain) {
             "${configuration.normalizedTrojanCarrierUri.ifBlank { "Trojan missing" }} -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
+        } else if (configuration.usesPsiphonChain) {
+            "${configuration.normalizedTrojanCarrierUri.ifBlank { "Trojan missing" }} -> Psiphon -> ${configuration.normalizedCdnEdge.ifBlank { "Packet edge missing" }}"
         } else if (configuration.usesPrivateRelay) {
             "${configuration.normalizedServerUrl.ifBlank { "Private VPS missing" }} -> Starlink relay"
         } else {

@@ -99,6 +99,7 @@ pub struct TrojanEndpoint {
     pub host: String,
     pub sni: String,
     pub transport: TrojanCarrierTransport,
+    pub use_tls: bool,
     pub tls_fingerprint: Option<String>,
     pub alpn_protocols: Vec<Vec<u8>>,
     pub upstream_proxy: Option<CarrierUpstreamProxy>,
@@ -162,9 +163,11 @@ impl TrojanEndpoint {
 
         let transport = TrojanCarrierTransport::from_uri_value(carrier_type)?;
         let security = security.unwrap_or_else(|| "tls".to_string());
-        if !security.is_empty() && security != "tls" {
-            return Err("DirectSock Trojan URI must use security=tls".to_string());
-        }
+        let use_tls = match security.as_str() {
+            "tls" => true,
+            "none" | "http" | "plaintext" => false,
+            _ => return Err("DirectSock Trojan URI must use security=tls or security=none".to_string()),
+        };
 
         let host = query_host
             .filter(|value| !value.trim().is_empty())
@@ -202,6 +205,7 @@ impl TrojanEndpoint {
             host,
             sni,
             transport,
+            use_tls,
             tls_fingerprint,
             alpn_protocols,
             upstream_proxy,
@@ -213,7 +217,8 @@ impl TrojanEndpoint {
     }
 
     fn ws_uri(&self) -> String {
-        format!("wss://{}{}", self.host, self.websocket_path)
+        let scheme = if self.use_tls { "wss" } else { "ws" };
+        format!("{}://{}{}", scheme, self.host, self.websocket_path)
     }
 }
 
@@ -874,12 +879,19 @@ async fn connect_trojan_remote_once(
     fragment_tls_hello: bool,
     force_chrome_tls: bool,
 ) -> Result<CarrierRemote, Box<dyn std::error::Error + Send + Sync>> {
-    let tls = connect_trojan_tls(config, fragment_tls_hello, force_chrome_tls).await?;
+    let stream: CarrierTlsStream = if config.endpoint.use_tls {
+        connect_trojan_tls(config, fragment_tls_hello, force_chrome_tls).await?
+    } else {
+        info!("[carrier] skipping TLS (security=none)");
+        let tcp = dial_carrier_tcp(&config.endpoint).await?;
+        let _ = tcp.set_nodelay(true);
+        Box::new(tcp)
+    };
 
     match config.endpoint.transport {
-        TrojanCarrierTransport::Tcp => Ok(CarrierRemote::Tcp(tls)),
+        TrojanCarrierTransport::Tcp => Ok(CarrierRemote::Tcp(stream)),
         TrojanCarrierTransport::WebSocket => {
-            let ws = upgrade_trojan_websocket(&config.endpoint, tls).await?;
+            let ws = upgrade_trojan_websocket(&config.endpoint, stream).await?;
             Ok(CarrierRemote::WebSocket(ws))
         }
     }

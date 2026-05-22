@@ -75,7 +75,7 @@ class DiagnosticActivity : Activity() {
         root.addView(headerRow)
 
         root.addView(TextView(this).apply {
-            text = "Built-in Packet Chain uses the known Trojan/Cloudflare carrier, Chrome TLS, TLSHello fragmentation, and Packet WebSocket escape. " +
+            text = "Built-in Psiphon Escape uses the known Trojan/Cloudflare carrier as Psiphon's upstream, then routes Packet through Psiphon's local proxy. " +
                 "Tap Connect on the main screen, then run this report while Packet is still trying or connected."
             textSize = 12f
             setPadding(0, 0, 0, pad / 4)

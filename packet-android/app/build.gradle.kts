@@ -46,4 +46,8 @@ android {
 }
 
 dependencies {
+    val psiphonCoreAar = file("libs/psiphon-tunnel-core.aar")
+    if (psiphonCoreAar.exists()) {
+        implementation(files(psiphonCoreAar))
+    }
 }

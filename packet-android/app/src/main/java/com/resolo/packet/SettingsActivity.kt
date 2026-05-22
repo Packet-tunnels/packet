@@ -90,7 +90,7 @@ class SettingsActivity : Activity() {
 
         emptyStateContainer.visibility = if (configurations.isEmpty()) View.VISIBLE else View.GONE
         protocolSummaryText.text = currentConfiguration.stackMode.title
-        transportSummaryText.text = if (currentConfiguration.usesCustomCarrier || currentConfiguration.usesPacketChain || currentConfiguration.usesPrivateRelay) {
+        transportSummaryText.text = if (currentConfiguration.usesCustomCarrier || currentConfiguration.usesPacketChain || currentConfiguration.usesPsiphonChain || currentConfiguration.usesPrivateRelay) {
             currentConfiguration.ingressLabel
         } else {
             currentConfiguration.transportLabel
@@ -201,7 +201,7 @@ class SettingsActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration): String {
         return buildList {
-            val endpoint = if (savedConfiguration.configuration.usesCustomCarrier || savedConfiguration.configuration.usesPacketChain) {
+            val endpoint = if (savedConfiguration.configuration.usesCustomCarrier || savedConfiguration.configuration.usesPacketChain || savedConfiguration.configuration.usesPsiphonChain) {
                 savedConfiguration.configuration.normalizedTrojanCarrierUri
             } else if (savedConfiguration.configuration.usesPrivateRelay) {
                 savedConfiguration.configuration.normalizedServerUrl
@@ -302,7 +302,8 @@ class SettingsActivity : Activity() {
 
         fun updateStackVisibility() {
             layeredContainer.visibility = if (selectedStackMode() == TunnelStackMode.CUSTOM_TROJAN_CARRIER ||
-                selectedStackMode() == TunnelStackMode.PACKET_CHAIN
+                selectedStackMode() == TunnelStackMode.PACKET_CHAIN ||
+                selectedStackMode() == TunnelStackMode.PSIPHON_CHAIN
             ) {
                 View.VISIBLE
             } else {

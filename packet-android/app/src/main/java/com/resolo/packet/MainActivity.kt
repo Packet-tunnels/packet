@@ -425,20 +425,20 @@ class MainActivity : Activity() {
     }
 
     /**
-     * If the selected profile is the built-in Packet Chain and the tunnel
+     * If the selected profile is one of the built-in chain profiles and the tunnel
      * is currently idle (cold launch, or a previous run failed), trigger
      * the Connect action automatically. Fires at most once per process so
      * the user can still cancel and stay disconnected.
      */
     private fun maybeAutoConnectOnLaunch() {
         if (autoConnectAttempted) return
-        if (!currentConfiguration.usesPacketChain) return
+        if (!currentConfiguration.usesPacketChain && !currentConfiguration.usesPsiphonChain) return
         val state = TunnelPreferences.loadSnapshot(this).state
         if (state != TunnelState.IDLE && state != TunnelState.FAILED) return
         autoConnectAttempted = true
         TunnelLogStore.append(
             this,
-            "[AUTO-CONNECT] Packet Chain selected — starting tunnel automatically.",
+            "[AUTO-CONNECT] ${currentConfiguration.ingressLabel} selected — starting tunnel automatically.",
         )
         requestConnect()
     }
@@ -1050,7 +1050,7 @@ class MainActivity : Activity() {
         val current = currentConfiguration
         settingsProfilesSummaryText.text = TunnelPreferences.loadSavedConfigurations(this).size.toString()
         settingsProtocolSummaryText.text = displayStackMode(current.stackMode)
-        settingsTransportSummaryText.text = if (current.usesCustomCarrier || current.usesPacketChain || current.usesPrivateRelay) {
+        settingsTransportSummaryText.text = if (current.usesCustomCarrier || current.usesPacketChain || current.usesPsiphonChain || current.usesPrivateRelay) {
             current.ingressLabel
         } else {
             displayTransportMode(current.transportMode)
@@ -1065,7 +1065,7 @@ class MainActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration, isSelected: Boolean): String {
         val configuration = savedConfiguration.configuration
-        val endpoint = if (configuration.usesCustomCarrier || configuration.usesPacketChain) {
+        val endpoint = if (configuration.usesCustomCarrier || configuration.usesPacketChain || configuration.usesPsiphonChain) {
             configuration.normalizedTrojanCarrierUri
         } else if (configuration.usesPrivateRelay) {
             configuration.normalizedServerUrl
@@ -1086,6 +1086,7 @@ class MainActivity : Activity() {
             TunnelStackMode.CUSTOM_TROJAN_CARRIER -> "DirectSock"
             TunnelStackMode.PACKET_CHAIN -> "Packet Chain"
             TunnelStackMode.PRIVATE_RELAY -> "Private Relay"
+            TunnelStackMode.PSIPHON_CHAIN -> "Psiphon Escape"
         }
     }
 
@@ -1380,12 +1381,14 @@ class MainActivity : Activity() {
     private fun renderEditorMode() {
         val isDirectSock = editorStackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
         val isPacketChain = editorStackMode == TunnelStackMode.PACKET_CHAIN
+        val isPsiphonChain = editorStackMode == TunnelStackMode.PSIPHON_CHAIN
         val isPrivateRelay = editorStackMode == TunnelStackMode.PRIVATE_RELAY
         editorStackValue.text = displayStackMode(editorStackMode)
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
-        editorDirectSockSection.visibility = if (isDirectSock || isPacketChain) View.VISIBLE else View.GONE
+        editorDirectSockSection.visibility = if (isDirectSock || isPacketChain || isPsiphonChain) View.VISIBLE else View.GONE
         editorTransportRow.text = when {
             isPacketChain -> "Transport      Auto through DirectSock"
+            isPsiphonChain -> "Transport      Auto through Psiphon"
             isPrivateRelay -> "Transport      Private WebSocket relay"
             else -> "Transport      ${displayTransportMode(editorTransportMode)}"
         }

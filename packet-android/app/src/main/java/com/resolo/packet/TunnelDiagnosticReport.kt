@@ -16,6 +16,7 @@ object TunnelDiagnosticReport {
         val selectedConfiguration = TunnelPreferences.loadSelectedConfigurationEntry(context)
         val activeConfiguration = TunnelPreferences.loadActiveConfiguration(context)
         val activeConfigurationName = TunnelPreferences.loadActiveConfigurationDisplayName(context)
+        val psiphonCoreLab = PsiphonCoreLab.status(context)
         val configuration = if (
             runtime.tunnelActive ||
             snapshot.state == TunnelState.RUNNING ||
@@ -40,7 +41,10 @@ object TunnelDiagnosticReport {
             appendLine("active_configuration=${activeConfigurationName ?: "(none)"}")
             appendLine("stack=${configuration.stackMode.title}")
             appendLine("server_url=${configuration.normalizedServerUrl.ifBlank { "(empty)" }}")
-            appendLine("transport=${if (configuration.usesPacketChain || configuration.usesPrivateRelay) configuration.ingressLabel else configuration.transportLabel}")
+            appendLine("transport=${if (configuration.usesPacketChain || configuration.usesPsiphonChain || configuration.usesPrivateRelay) configuration.ingressLabel else configuration.transportLabel}")
+            if (configuration.usesPacketChain || configuration.usesPsiphonChain) {
+                appendLine("inner_transport=${configuration.transportMode.title}")
+            }
             appendLine("listen_port_request=${configuration.listenPort.ifBlank { "auto" }}")
             appendLine("cdn_edge=${configuration.normalizedCdnEdge.ifBlank { "(empty)" }}")
             appendLine("host_override=${configuration.normalizedHostOverride.ifBlank { "(empty)" }}")
@@ -52,6 +56,7 @@ object TunnelDiagnosticReport {
             appendLine()
             appendLine("[Runtime]")
             appendLine("state=${runtime.state}")
+            appendLine("transport=${runtime.transport}")
             appendLine("server_host=${runtime.serverHost}")
             appendLine("cdn_edge=${runtime.cdnEdge ?: "(none)"}")
             appendLine("server_country=${runtime.serverCountryName ?: runtime.serverCountryCode ?: "(unknown)"}")
@@ -79,6 +84,9 @@ object TunnelDiagnosticReport {
             appendLine("last_failure_detail=${diagnostics.lastFailureDetail ?: "(none)"}")
             appendLine("last_updated_ms=${diagnostics.lastUpdatedMs ?: "(none)"}")
             appendLine("vpn_disclosure_acknowledged=${TunnelPreferences.isVpnDisclosureAcknowledged(context)}")
+            appendLine()
+            appendLine("[PsiphonCoreLab]")
+            appendLine(psiphonCoreLab.reportLine)
             appendLine()
             appendLine("[Logs]")
             if (logs.isEmpty()) {

@@ -576,6 +576,10 @@ async fn run_rotating_transport(
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
+                let message = format!("candidate '{}' failed: {}", pool[cand_idx].label, e);
+                mesh::set_status("degraded");
+                mesh::set_last_error(message.clone());
+                set_runtime_last_error(message.clone());
                 warn!(
                     "[PHANTOM] candidate '{}' failed: {} — rotating",
                     pool[cand_idx].label, e
