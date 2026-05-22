@@ -480,6 +480,9 @@ data class TunnelConfiguration(
                 if (!isSupportedCarrierUri) {
                     return "DirectSock carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
                 }
+                if (usesRealityCarrier) {
+                    return "VLESS Reality is not supported by the embedded DirectSock carrier yet. Use Trojan or VLESS TCP/WS over TLS/plaintext."
+                }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "DirectSock local port must be 1024-65535."
                 }
@@ -492,6 +495,9 @@ data class TunnelConfiguration(
                 }
                 if (!isSupportedCarrierUri) {
                     return "Packet Chain carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
+                }
+                if (usesRealityCarrier) {
+                    return "VLESS Reality is not supported by the embedded DirectSock carrier yet. Use Trojan or VLESS TCP/WS over TLS/plaintext."
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "Packet Chain carrier port must be 1024-65535."
@@ -512,6 +518,9 @@ data class TunnelConfiguration(
                 }
                 if (!isSupportedCarrierUri) {
                     return "Psiphon Chain carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
+                }
+                if (usesRealityCarrier) {
+                    return "VLESS Reality is not supported by the embedded DirectSock carrier yet. Use Trojan or VLESS TCP/WS over TLS/plaintext."
                 }
                 if (carrierProxyPort.trim().toIntOrNull()?.takeIf { it in 1024..65535 } == null) {
                     return "Psiphon Chain carrier port must be 1024-65535."

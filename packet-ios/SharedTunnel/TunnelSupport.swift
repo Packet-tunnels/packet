@@ -489,6 +489,10 @@ struct TunnelConfiguration: Codable, Equatable {
             return "Carrier must be trojan://, vless://, or V2Ray JSON with a VLESS outbound."
         }
 
+        if usesRealityCarrier {
+            return "VLESS Reality is not supported by the embedded DirectSock carrier yet. Use Trojan or VLESS TCP/WS over TLS/plaintext."
+        }
+
         guard carrierProxyPortValue != nil else {
             return "DirectSock local port must be 1024-65535."
         }

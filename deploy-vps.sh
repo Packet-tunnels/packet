@@ -130,13 +130,17 @@ echo "[4b/5] Installing private Psiphon OSSH service …"
 PSIPHON_SCRIPT="$REPO_DIR/packet-android/scripts/psiphon-core-lab.sh"
 PSIPHON_SERVER_CONFIG="$REPO_DIR/packet-android/.psiphon-core-lab/server/psiphond.config"
 PSIPHON_CLIENT_CONFIG="$REPO_DIR/packet-android/.psiphon-core-lab/client/client.config"
+PSIPHON_CONFIG_ACTION="reused existing config"
 if [[ ! -x "$REPO_DIR/packet-android/.psiphon-core-lab/psiphon-tunnel-core-binaries/psiphond/psiphond" ]]; then
+  echo "       Psiphon binaries missing; fetching lab binaries …"
   bash "$PSIPHON_SCRIPT" fetch
 fi
 PSIPHON_PUBLIC_IP="$(curl -4 -s --max-time 5 https://api.ipify.org || hostname -I | awk '{print $1}')"
 if [[ ! -f "$PSIPHON_SERVER_CONFIG" || ! -f "$PSIPHON_CLIENT_CONFIG" ]]; then
+  PSIPHON_CONFIG_ACTION="generated new config"
   PUBLIC_IP="$PSIPHON_PUBLIC_IP" PORT="$PSIPHON_PORT" PROTOCOL=OSSH bash "$PSIPHON_SCRIPT" generate-server
 fi
+echo "       Psiphon config: $PSIPHON_CONFIG_ACTION"
 
 cat > /etc/systemd/system/packet-psiphond.service <<UNIT
 [Unit]
@@ -171,19 +175,28 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: a
 fi
 
 # ── 5. Start + report ─────────────────────────────────────────────
-echo "[5/5] Starting phantom-server …"
+echo "[5/5] Starting Packet services …"
 systemctl restart phantom-server
 systemctl restart packet-psiphond
 sleep 2
 systemctl --no-pager --full status phantom-server | sed -n '1,18p' || true
 systemctl --no-pager --full status packet-psiphond | sed -n '1,18p' || true
 
+PSIPHON_LISTENING="unknown"
+if command -v ss >/dev/null 2>&1; then
+  if ss -lnt | awk '{print $4}' | grep -Eq "(^|:)${PSIPHON_PORT}$"; then
+    PSIPHON_LISTENING="yes"
+  else
+    PSIPHON_LISTENING="no"
+  fi
+fi
+
 PUBLIC_IP4="$(curl -4 -s --max-time 5 https://api.ipify.org || echo "?")"
 PUBLIC_IP6="$(curl -6 -s --max-time 5 https://api64.ipify.org || echo "")"
 
 echo
 echo "═══════════════════════════════════════════════════════════"
-echo "  ✓ phantom-server is alive (systemd Restart=always)"
+echo "  ✓ Packet services configured (systemd Restart=always)"
 echo "═══════════════════════════════════════════════════════════"
 echo "  Public IPv4 : ${PUBLIC_IP4}"
 [[ -n "$PUBLIC_IP6" ]] && echo "  Public IPv6 : ${PUBLIC_IP6}"
@@ -191,6 +204,7 @@ echo "  WS/Meek port: $WS_PORT/tcp"
 echo "  OBFS port   : $OBFS_PORT/tcp"
 echo "  QUIC port   : $QUIC_PORT/udp"
 echo "  Psiphon OSSH: $PSIPHON_PORT/tcp"
+echo "  Psiphon listen check: $PSIPHON_LISTENING"
 echo "  Secret      : $PHANTOM_SECRET"
 echo "  OBFS key    : $OBFS_KEY"
 echo "  Secrets file: $SECRETS_FILE"
@@ -209,7 +223,8 @@ echo "                systemctl restart packet-psiphond"
 echo "  Stop:         systemctl stop phantom-server"
 echo "                systemctl stop packet-psiphond"
 echo
-echo "  If packet-psiphond generated a new Psiphon server entry, copy it back:"
+echo "  Psiphon config action: $PSIPHON_CONFIG_ACTION"
+echo "  If this says 'generated new config', copy it back:"
 echo "    scp root@${PUBLIC_IP4}:${PSIPHON_CLIENT_CONFIG} packet-android/.psiphon-core-lab/client/client.config"
 echo "    bash packet-android/scripts/psiphon-core-lab.sh install-client-asset"
 echo
@@ -220,6 +235,14 @@ echo "      const val CHAIN_SERVER_URL = \"http://${PUBLIC_IP4}:${WS_PORT}\""
 echo "      const val CHAIN_EDGE       = \"${PUBLIC_IP4}:${WS_PORT}\""
 echo "      const val CHAIN_SECRET     = \"${PHANTOM_SECRET}\""
 echo "      const val CHAIN_OBFS_KEY   = \"${OBFS_KEY}\""
+echo
+echo "  And paste these into"
+echo "  packet-ios/SharedTunnel/TunnelSupport.swift:"
+echo
+echo "      static let chainServerURL = \"http://${PUBLIC_IP4}:${WS_PORT}\""
+echo "      static let chainSecret = \"${PHANTOM_SECRET}\""
+echo "      static let chainEdge = \"${PUBLIC_IP4}:${WS_PORT}\""
+echo "      static let chainObfsKey = \"${OBFS_KEY}\""
 echo
 echo "  Packet Native QUIC test profile:"
 echo "      Server URL : http://${PUBLIC_IP4}:${WS_PORT}"
