@@ -91,12 +91,15 @@ source /root/.cargo/env 2>/dev/null || true
 echo "       rustc: $(rustc --version)"
 
 # ── 3. Build phantom-server (release) ─────────────────────────────
-echo "[3/5] Building phantom-server (release) — first build can take ~3 min …"
-cd "$REPO_DIR"
-CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cargo build --release -p phantom-server 2>&1 \
-  | tail -n 8
-install -m 0755 target/release/phantom-server /usr/local/bin/phantom-server
-echo "       installed to /usr/local/bin/phantom-server"
+if [[ -x "/usr/local/bin/phantom-server" ]]; then
+  echo "[3/5] Reusing existing phantom-server binary"
+else
+  echo "[3/5] Building phantom-server (release) — first build can take ~3 min …"
+  cd "$REPO_DIR"
+  CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" cargo build --release -p phantom-server
+  install -m 0755 target/release/phantom-server /usr/local/bin/phantom-server
+  echo "       installed to /usr/local/bin/phantom-server"
+fi
 
 # ── 4. systemd unit (alive mode) ──────────────────────────────────
 echo "[4/5] Installing systemd unit (Restart=always) …"
