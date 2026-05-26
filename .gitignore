@@ -98,6 +98,30 @@ test_*.py
 coverage/
 htmlcov/
 
+# Images & Assets
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.webp
+*.ico
+*.tiff
+*.tif
+*.bmp
+*.psd
+*.ai
+*.sketch
+*.figma
+
+# Asset directories
+assets/
+images/
+logos/
+icons/
+screenshots/
+artwork/
+
 # System
 Thumbs.db
 *.log
