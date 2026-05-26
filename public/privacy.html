@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy — Packet</title>
+    <meta name="description" content="Packet Privacy Policy — We are committed to your privacy. Read how we handle your data.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #0a0a0a;
+            --surface: #111111;
+            --surface-border: #1e1e1e;
+            --text-primary: #f5f5f5;
+            --text-secondary: #888;
+            --text-tertiary: #444;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
+
+        nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 40px;
+            border-bottom: 1px solid var(--surface-border);
+            background: var(--bg);
+        }
+
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+            font-size: 17px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .nav-logo svg { width: 22px; height: 22px; }
+
+        .nav-back {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        .nav-back:hover { color: var(--text-primary); }
+
+        .page-header {
+            padding: 80px 24px 48px;
+            max-width: 760px;
+            margin: 0 auto;
+            border-bottom: 1px solid var(--surface-border);
+        }
+
+        .page-header .label {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+            margin-bottom: 12px;
+        }
+
+        .page-header h1 {
+            font-size: clamp(32px, 5vw, 52px);
+            font-weight: 700;
+            letter-spacing: -1.5px;
+            margin-bottom: 16px;
+        }
+
+        .page-header .updated {
+            font-size: 13px;
+            color: var(--text-tertiary);
+        }
+
+        main {
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 56px 24px 100px;
+        }
+
+        .policy-section {
+            margin-bottom: 48px;
+        }
+
+        .policy-section h2 {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 14px;
+            letter-spacing: -0.5px;
+        }
+
+        .policy-section p, .policy-section li {
+            font-size: 15px;
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+
+        .policy-section ul {
+            padding-left: 24px;
+            margin-top: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .highlight-box {
+            background: var(--surface);
+            border: 1px solid var(--surface-border);
+            border-radius: 16px;
+            padding: 24px 28px;
+            margin: 32px 0;
+        }
+
+        .highlight-box p {
+            font-size: 15px;
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+
+        .highlight-box strong {
+            color: var(--text-primary);
+        }
+
+        hr {
+            border: none;
+            border-top: 1px solid var(--surface-border);
+            margin: 40px 0;
+        }
+
+        a { color: var(--text-primary); }
+
+        footer {
+            border-top: 1px solid var(--surface-border);
+            padding: 32px 24px;
+            text-align: center;
+        }
+        footer p { font-size: 13px; color: var(--text-tertiary); }
+    </style>
+</head>
+<body>
+
+    <nav>
+        <a href="index.html" class="nav-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            Packet
+        </a>
+        <a href="index.html" class="nav-back">← Back to Home</a>
+    </nav>
+
+    <div class="page-header">
+        <p class="label">Legal</p>
+        <h1>Privacy Policy</h1>
+        <p class="updated">Last Updated: May 18, 2026</p>
+    </div>
+
+    <main>
+        <div class="highlight-box">
+            <p><strong>Short version:</strong> Packet is designed to collect as little data as possible. Your VPN configuration is stored only on your device. We don't have servers that log your activity, and we don't sell or share any data.</p>
+        </div>
+
+        <div class="policy-section">
+            <h2>1. Information We Collect</h2>
+            <p>Packet only requests the information needed to establish and maintain your network connection. This includes:</p>
+            <ul>
+                <li><strong>Server URL:</strong> The endpoint of your configured server, stored locally on your device.</li>
+                <li><strong>Shared Secret:</strong> The authentication credential for your server, stored locally on your device. On iOS, Packet stores this credential in the iOS Keychain.</li>
+                <li><strong>VPN Disclosure Acknowledgement:</strong> A boolean flag stored on-device to track if you have reviewed the required VPN disclosure.</li>
+            </ul>
+            <p style="margin-top:14px;">We do <strong>not</strong> collect your name, email address, location, or any other personal information.</p>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>2. How We Use Your Information</h2>
+            <p>The configuration data stored on your device is used solely to:</p>
+            <ul>
+                <li>Establish and maintain your VPN tunnel connection when you choose to connect.</li>
+                <li>Restore your last used configuration when you reopen the app.</li>
+            </ul>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>3. Data Sharing</h2>
+            <p>We do not sell, trade, or share your information with any third parties. Packet does not contain any advertising SDKs, marketing SDKs, or analytics frameworks.</p>
+            <p style="margin-top:14px;">When you connect, your configured server receives the traffic and connection metadata required to operate the tunnel. We do not operate or control any shared VPN servers, and have no visibility into your network traffic.</p>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>4. Data Retention & Deletion</h2>
+            <p>All configuration data is stored locally on your device. You can:</p>
+            <ul>
+                <li>Delete individual server profiles inside the app's Settings screen.</li>
+                <li>Remove all data by deleting the Packet app from your device.</li>
+            </ul>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>5. Platform VPN Controls</h2>
+            <p>When you connect on iOS, Packet creates a system VPN configuration profile managed by iOS. You can remove it in iOS Settings under General, VPN &amp; Device Management. On Android, Packet uses Android VpnService and can be disconnected from the app or system VPN controls.</p>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>6. Changes to This Policy</h2>
+            <p>If we make significant changes to this privacy policy, we will update the "Last Updated" date at the top of this page. We encourage you to review this page periodically.</p>
+        </div>
+
+        <hr>
+
+        <div class="policy-section">
+            <h2>7. Contact</h2>
+            <p>If you have questions or concerns about this Privacy Policy, please contact us at:<br><br>
+            <a href="mailto:support@packetapp.net">support@packetapp.net</a></p>
+        </div>
+    </main>
+
+    <footer>
+        <p>© 2026 Packet. All rights reserved.</p>
+    </footer>
+
+</body>
+</html>

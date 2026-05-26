@@ -10,13 +10,12 @@ struct PacketServersView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    if tunnelManager.savedConfigurations.isEmpty {
-                        EmptyConfigurationState()
-                            .listRowBackground(Color.clear)
-                            .listRowInsets(EdgeInsets())
-                    } else {
+            Group {
+                if tunnelManager.savedConfigurations.isEmpty {
+                    EmptyConfigurationState()
+                } else {
+                    List {
+                        Section {
                         ForEach(tunnelManager.savedConfigurations) { savedConfiguration in
                             ConfigurationRow(
                                 configuration: savedConfiguration,
@@ -34,17 +33,16 @@ struct PacketServersView: View {
                             }
                         }
                         .onDelete(perform: tunnelManager.deleteConfigurations)
+                        } footer: {
+                            if tunnelManager.hasPendingSelectedConfiguration {
+                                Text("Reconnect to apply selected server.")
+                                    .foregroundStyle(.orange)
+                            }
+                        }
                     }
-                } header: {
-                    Text("Saved Servers")
-                } footer: {
-                    if tunnelManager.hasPendingSelectedConfiguration {
-                        Text("Reconnect to apply selected server.")
-                            .foregroundStyle(.orange)
-                    }
+                    .listStyle(.insetGrouped)
                 }
             }
-            .listStyle(.insetGrouped)
             .navigationTitle("Servers")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -358,24 +356,22 @@ private struct ConfigurationEditorSheet: View {
 // MARK: - Helper Views
 private struct EmptyConfigurationState: View {
     var body: some View {
-        VStack(alignment: .center, spacing: 12) {
+        VStack(spacing: 10) {
             Image(systemName: "server.rack")
-                .font(.system(size: 40))
-                .foregroundColor(.secondary)
+                .font(.system(size: 32, weight: .regular))
+                .foregroundStyle(.secondary)
 
-            Text("No configurations yet")
-                .font(.system(size: 16, weight: .semibold))
+            Text("Empty")
+                .font(.headline)
                 .foregroundStyle(.primary)
 
-            Text(
-                "Use the top-right add button to create a server profile, then select it before connecting."
-            )
-            .font(.system(size: 13))
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
+            Text("Tap + to add a server.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 32)
-        .frame(maxWidth: .infinity)
+        .multilineTextAlignment(.center)
+        .padding(24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

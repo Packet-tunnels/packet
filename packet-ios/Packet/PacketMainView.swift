@@ -66,7 +66,7 @@ struct PacketMainView: View {
                                 .foregroundStyle(.primary)
                         }
                     } else {
-                        Text(tunnelManager.state == .launching ? "Connecting" : "Not Protected")
+                        Text(protectionSubtitle)
                             .font(.system(size: 20, weight: .semibold, design: .rounded))
                             .foregroundStyle(.primary)
                     }
@@ -96,16 +96,10 @@ struct PacketMainView: View {
                 .foregroundStyle(.orange)
                 .font(.system(size: 20))
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Action Required")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary)
-
-                Text(PacketComplianceCopy.reminderText)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(PacketComplianceCopy.reminderText)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -201,6 +195,10 @@ struct PacketMainView: View {
     // MARK: - Properties & Logic
 
     private var statusColor: Color {
+        guard tunnelManager.hasConnectableConfiguration || tunnelManager.isRunning else {
+            return .gray
+        }
+
         switch tunnelManager.state {
         case .running:
             return .green
@@ -214,6 +212,10 @@ struct PacketMainView: View {
     }
 
     private var statusHeadline: String {
+        guard tunnelManager.hasConnectableConfiguration || tunnelManager.isRunning else {
+            return "No Config"
+        }
+
         switch tunnelManager.state {
         case .running:
             return "Connected"
@@ -292,9 +294,22 @@ struct PacketMainView: View {
         tunnelManager.isRunning ? "Stop" : "Connect"
     }
 
+    private var protectionSubtitle: String {
+        if tunnelManager.state == .launching {
+            return "Starting tunnel"
+        }
+
+        return tunnelManager.hasConnectableConfiguration ? "Not Protected" : "No Config"
+    }
+
     private func handlePrimaryAction() {
         let feedback = UIImpactFeedbackGenerator(style: .medium)
         feedback.impactOccurred()
+
+        guard tunnelManager.isRunning || tunnelManager.hasConnectableConfiguration else {
+            tunnelManager.noteMissingConfiguration()
+            return
+        }
 
         guard tunnelManager.isRunning || complianceStore.vpnDisclosureAcknowledged else {
             shouldStartTunnelAfterDisclosure = true
@@ -393,101 +408,67 @@ struct PacketVPNDisclosureSheet: View {
 
     var body: some View {
         NavigationStack {
-            ZStack(alignment: .bottom) {
-                VStack(spacing: 0) {
-                    ScrollView(.vertical, showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 24) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Image(systemName: "checkmark.shield.fill")
-                                    .font(.system(size: 44))
-                                    .foregroundStyle(Color.green)
-                                    .padding(.bottom, 8)
+            List {
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundStyle(.green)
 
-                                Text("VPN Data-Use Disclosure")
-                                    .font(.system(size: 24, weight: .bold))
-                                    .foregroundStyle(.primary)
+                        Text(PacketComplianceCopy.disclosureIntro)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.vertical, 8)
+                    .listRowInsets(EdgeInsets(top: 12, leading: 20, bottom: 12, trailing: 20))
+                    .listRowSeparator(.hidden)
+                }
 
-                                Text(PacketComplianceCopy.disclosureIntro)
-                                    .font(.system(size: 15))
+                Section {
+                    ForEach(PacketComplianceCopy.summaryItems) { item in
+                        Label {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title)
+                                    .font(.body.weight(.semibold))
+
+                                Text(item.detail)
+                                    .font(.subheadline)
                                     .foregroundStyle(.secondary)
-                                    .lineSpacing(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-
-                            VStack(spacing: 12) {
-                                ForEach(PacketComplianceCopy.summaryItems) { item in
-                                    PacketDisclosureSummaryCard(item: item)
-                                }
-                            }
-
-                            Text(PacketComplianceCopy.disclosureOutro)
-                                .font(.system(size: 14))
-                                .foregroundStyle(.tertiary)
-                                .fixedSize(horizontal: false, vertical: true)
+                        } icon: {
+                            Image(systemName: item.systemImage)
+                                .foregroundStyle(.secondary)
                         }
-                        .padding(.horizontal, 28)
-                        .padding(.top, 32)
-                        .padding(.bottom, 120)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(Color(uiColor: .systemGroupedBackground))
 
-                VStack(spacing: 0) {
-                    Divider()
-
-                    HStack(spacing: 10) {
-                        Button(action: onDismiss) {
-                            Text("Cancel")
-                                .font(.system(size: 15, weight: .semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .frame(maxWidth: .infinity)
-
-                        Button(action: onAccept) {
-                            Text("OK")
-                                .font(.system(size: 15, weight: .semibold))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .frame(maxWidth: .infinity)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
+                Section {
+                    Text(PacketComplianceCopy.disclosureOutro)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .background(Color(uiColor: .secondarySystemGroupedBackground))
             }
+            .listStyle(.plain)
+            .navigationTitle("VPN Data-Use Disclosure")
             .navigationBarTitleDisplayMode(.inline)
-        }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-    }
-}
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(action: onDismiss) {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("Close")
+                }
 
-private struct PacketDisclosureSummaryCard: View {
-    let item: PacketComplianceSummaryItem
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: item.systemImage)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(width: 24)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.title)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.primary)
-
-                Text(item.detail)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("OK", action: onAccept)
+                        .fontWeight(.semibold)
+                }
             }
-
-            Spacer(minLength: 0)
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
     }
 }

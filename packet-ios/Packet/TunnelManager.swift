@@ -146,6 +146,10 @@ final class TunnelManager: ObservableObject {
         return selectedConfigurationID != activeConfigurationID
     }
 
+    var hasConnectableConfiguration: Bool {
+        selectedConfiguration != nil || !configuration.isEmpty
+    }
+
     func toggleTunnel() {
         if isRunning {
             stopTunnel()
@@ -165,6 +169,13 @@ final class TunnelManager: ObservableObject {
         lastResult = "Packet is idle"
     }
 
+    func noteMissingConfiguration() {
+        guard !isRunning else { return }
+        state = .idle
+        lastResult = "No configuration selected"
+        setTelemetryInactive(stateLabel: "idle")
+    }
+
     func selectConfiguration(id: UUID) {
         guard let configuration = savedConfigurations.first(where: { $0.id == id }) else { return }
 
@@ -174,10 +185,26 @@ final class TunnelManager: ObservableObject {
     }
 
     func addConfiguration(named name: String, configuration: TunnelConfiguration) {
+        if let index = savedConfigurations.firstIndex(where: {
+            configurationIdentity($0.configuration) == configurationIdentity(configuration)
+        }) {
+            let existingID = savedConfigurations[index].id
+            if savedConfigurations[index].trimmedName.isEmpty && !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                savedConfigurations[index].name = name
+            }
+            savedConfigurations[index].configuration = configuration
+            selectedConfigurationID = existingID
+            self.configuration = configuration
+            PacketKeychainStore.shared.save(secret: configuration.secret, for: existingID.uuidString)
+            persistConfigurationListState()
+            return
+        }
+
         let savedConfiguration = SavedTunnelConfiguration(name: name, configuration: configuration)
         savedConfigurations.append(savedConfiguration)
         selectedConfigurationID = savedConfiguration.id
         self.configuration = configuration
+        PacketKeychainStore.shared.save(secret: configuration.secret, for: savedConfiguration.id.uuidString)
         persistConfigurationListState()
     }
 
@@ -186,6 +213,7 @@ final class TunnelManager: ObservableObject {
 
         savedConfigurations[index].name = name
         savedConfigurations[index].configuration = configuration
+        savedConfigurations = deduplicatedConfigurations(savedConfigurations, preferredID: id)
 
         if selectedConfigurationID == id {
             self.configuration = configuration
@@ -223,9 +251,40 @@ final class TunnelManager: ObservableObject {
         }
     }
 
+    func clearSelectedConfiguration() {
+        guard !isRunning else { return }
+
+        selectedConfigurationID = nil
+        configuration = TunnelConfiguration()
+        lastResult = "Configuration reset"
+        persistConfigurationListState()
+    }
+
+    func deleteAllConfigurations() {
+        guard !isRunning else { return }
+
+        for savedConfiguration in savedConfigurations {
+            PacketKeychainStore.shared.deleteSecret(for: savedConfiguration.id.uuidString)
+        }
+
+        savedConfigurations.removeAll()
+        selectedConfigurationID = nil
+        activeConfigurationID = nil
+        activeConfigurationSnapshot = nil
+        activeConfigurationName = nil
+        configuration = TunnelConfiguration()
+        lastResult = "All configurations deleted"
+        persistConfigurationListState()
+    }
+
     func startTunnel() {
         Task {
             do {
+                guard hasConnectableConfiguration else {
+                    noteMissingConfiguration()
+                    return
+                }
+
                 try validate(configuration)
                 resetTelemetryForNewSession()
 
@@ -452,6 +511,10 @@ final class TunnelManager: ObservableObject {
         var configurations = SharedTunnelPreferenceStore.savedConfigurations
         var selectedConfigurationID = SharedTunnelPreferenceStore.selectedConfigurationID
         var activeConfigurationID = SharedTunnelPreferenceStore.activeConfigurationID
+        configurations = deduplicatedConfigurations(
+            configurations,
+            preferredID: selectedConfigurationID ?? activeConfigurationID
+        )
         let persistedConfiguration = persistedConfiguration(from: manager)
 
         if let persistedConfiguration, !persistedConfiguration.isEmpty {
@@ -500,6 +563,10 @@ final class TunnelManager: ObservableObject {
                 configurations[i].configuration.secret = secret
             }
         }
+        configurations = deduplicatedConfigurations(
+            configurations,
+            preferredID: selectedConfigurationID ?? activeConfigurationID
+        )
         
         self.savedConfigurations = configurations
         self.selectedConfigurationID = selectedConfigurationID ?? configurations.first?.id
@@ -547,6 +614,21 @@ final class TunnelManager: ObservableObject {
     }
 
     private func persistConfigurationListState() {
+        savedConfigurations = deduplicatedConfigurations(
+            savedConfigurations,
+            preferredID: selectedConfigurationID ?? activeConfigurationID
+        )
+        if let selectedConfigurationID,
+            !savedConfigurations.contains(where: { $0.id == selectedConfigurationID })
+        {
+            self.selectedConfigurationID = savedConfigurations.first?.id
+        }
+        if let activeConfigurationID,
+            !savedConfigurations.contains(where: { $0.id == activeConfigurationID })
+        {
+            self.activeConfigurationID = nil
+        }
+
         // Strip secrets before saving to UserDefaults
         let scrubbedConfigurations = savedConfigurations.map { saved -> SavedTunnelConfiguration in
             var scrubbed = saved
@@ -554,13 +636,55 @@ final class TunnelManager: ObservableObject {
             if !scrubbed.configuration.secret.isEmpty {
                 PacketKeychainStore.shared.save(secret: scrubbed.configuration.secret, for: scrubbed.id.uuidString)
             }
-            scrubbed.configuration.secret = "" 
+            scrubbed.configuration.secret = ""
             return scrubbed
         }
         
         SharedTunnelPreferenceStore.setSavedConfigurations(scrubbedConfigurations)
         SharedTunnelPreferenceStore.setSelectedConfigurationID(selectedConfigurationID)
         SharedTunnelPreferenceStore.setActiveConfigurationID(activeConfigurationID)
+    }
+
+    private func deduplicatedConfigurations(
+        _ configurations: [SavedTunnelConfiguration],
+        preferredID: UUID? = nil
+    ) -> [SavedTunnelConfiguration] {
+        var orderedConfigurations: [SavedTunnelConfiguration] = []
+        var indexByIdentity: [String: Int] = [:]
+
+        for configuration in configurations {
+            let identity = configurationIdentity(configuration.configuration)
+            if let existingIndex = indexByIdentity[identity] {
+                if configuration.id == preferredID && orderedConfigurations[existingIndex].id != preferredID {
+                    orderedConfigurations[existingIndex] = configuration
+                }
+                continue
+            }
+
+            indexByIdentity[identity] = orderedConfigurations.count
+            orderedConfigurations.append(configuration)
+        }
+
+        return orderedConfigurations
+    }
+
+    private func configurationIdentity(_ configuration: TunnelConfiguration) -> String {
+        [
+            String(configuration.stackMode.rawValue),
+            configuration.normalizedServerURL,
+            configuration.normalizedSecret,
+            configuration.listenPort.trimmingCharacters(in: .whitespacesAndNewlines),
+            configuration.normalizedCDNEdge,
+            configuration.normalizedHostOverride,
+            configuration.normalizedSNIOverride,
+            String(configuration.transportMode.rawValue),
+            configuration.normalizedObfsKey,
+            configuration.normalizedUpstreamProxy,
+            String(configuration.fragmentEnabled),
+            configuration.fragmentSize.trimmingCharacters(in: .whitespacesAndNewlines),
+            configuration.normalizedTrojanCarrierURI,
+            configuration.carrierProxyPort.trimmingCharacters(in: .whitespacesAndNewlines)
+        ].joined(separator: "\u{1F}")
     }
 
     private func applyConfiguration(to manager: NETunnelProviderManager) {

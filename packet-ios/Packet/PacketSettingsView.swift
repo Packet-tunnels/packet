@@ -4,6 +4,7 @@ import UIKit
 struct PacketSettingsView: View {
     @ObservedObject var tunnelManager: TunnelManager
     @ObservedObject var complianceStore: PacketComplianceStore
+    @State private var confirmation: SettingsConfirmation?
 
     private var buildVersionLabel: String {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -56,6 +57,42 @@ struct PacketSettingsView: View {
                 }
 
                 Section {
+                    Button(role: .destructive) {
+                        confirmation = .resetSelectedConfiguration
+                    } label: {
+                        SettingsActionRow(
+                            systemImage: "arrow.counterclockwise",
+                            title: "Reset Selected Configuration"
+                        )
+                    }
+                    .disabled(tunnelManager.isRunning || !tunnelManager.hasConnectableConfiguration)
+
+                    Button(role: .destructive) {
+                        confirmation = .deleteAllConfigurations
+                    } label: {
+                        SettingsActionRow(
+                            systemImage: "trash",
+                            title: "Delete All Server Profiles"
+                        )
+                    }
+                    .disabled(tunnelManager.isRunning || tunnelManager.savedConfigurations.isEmpty)
+                } header: {
+                    Text("Configuration Actions")
+                } footer: {
+                    Text(tunnelManager.isRunning ? "Disconnect before changing saved configurations." : "Reset clears the selected profile. Delete removes every saved server profile from this device.")
+                }
+
+                Section {
+                    SettingsSummaryRow(
+                        systemImage: "info.circle",
+                        title: "Version",
+                        value: buildVersionLabel
+                    )
+                } header: {
+                    Text("Version")
+                }
+
+                Section {
                     Link(destination: PacketLegalLinks.privacy) {
                         SettingsLinkRow(systemImage: "hand.raised", title: "Privacy Policy")
                     }
@@ -72,31 +109,88 @@ struct PacketSettingsView: View {
                 } footer: {
                     Text(PacketComplianceCopy.settingsFooterText)
                 }
-
-                Section {
-                    NavigationLink(destination: AboutView(buildVersionLabel: buildVersionLabel)) {
-                        SettingsSummaryRow(
-                            systemImage: "info.circle",
-                            title: "About Packet",
-                            value: buildVersionLabel
-                        )
-                    }
-                } header: {
-                    Text("About")
-                }
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .confirmationDialog(
+                confirmation?.title ?? "",
+                isPresented: Binding(
+                    get: { confirmation != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            confirmation = nil
+                        }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                if let confirmation {
+                    Button(confirmation.confirmTitle, role: .destructive) {
+                        perform(confirmation)
+                    }
+
+                    Button("Cancel", role: .cancel) {
+                        self.confirmation = nil
+                    }
+                }
+            } message: {
+                if let confirmation {
+                    Text(confirmation.message)
+                }
+            }
         }
+    }
+
+    private func perform(_ confirmation: SettingsConfirmation) {
+        switch confirmation {
+        case .resetSelectedConfiguration:
+            tunnelManager.clearSelectedConfiguration()
+        case .deleteAllConfigurations:
+            tunnelManager.deleteAllConfigurations()
+        }
+
+        self.confirmation = nil
     }
 }
 
 // MARK: - Helper Views
+private enum SettingsConfirmation {
+    case resetSelectedConfiguration
+    case deleteAllConfigurations
+
+    var title: String {
+        switch self {
+        case .resetSelectedConfiguration:
+            return "Reset selected configuration?"
+        case .deleteAllConfigurations:
+            return "Delete all server profiles?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .resetSelectedConfiguration:
+            return "This clears the selected configuration on this device. Saved server profiles remain available."
+        case .deleteAllConfigurations:
+            return "This removes every saved server profile and stored profile secret from this device."
+        }
+    }
+
+    var confirmTitle: String {
+        switch self {
+        case .resetSelectedConfiguration:
+            return "Reset"
+        case .deleteAllConfigurations:
+            return "Delete All"
+        }
+    }
+}
+
 private enum PacketLegalLinks {
-    static let privacy = URL(string: "https://packet-tunnels.github.io/packet-public/privacy.html")!
-    static let terms = URL(string: "https://packet-tunnels.github.io/packet-public/terms.html")!
-    static let support = URL(string: "https://packet-tunnels.github.io/packet-public/support.html")!
+    static let privacy = URL(string: "https://packet-tunnels.github.io/public/privacy.html")!
+    static let terms = URL(string: "https://packet-tunnels.github.io/public/terms.html")!
+    static let support = URL(string: "https://packet-tunnels.github.io/public/support.html")!
 }
 
 private struct SettingsSummaryRow: View {
@@ -121,6 +215,25 @@ private struct SettingsSummaryRow: View {
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct SettingsActionRow: View {
+    let systemImage: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 20)
+
+            Text(title)
+                .font(.system(size: 15, weight: .regular))
+
+            Spacer()
         }
         .padding(.vertical, 4)
     }
