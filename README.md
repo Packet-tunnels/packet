@@ -95,6 +95,13 @@ Configure the client using the output from `deploy-vps.sh`. Clients need:
 - **iOS Build:** See `packet-ios/` for native compilation
 - **Protocol:** See `packet-proto/` for encryption and framing details
 
+## Legal Pages
+
+- **Privacy Policy:** https://packet-tunnels.github.io/packet-public/privacy.html
+- **Terms of Use:** https://packet-tunnels.github.io/packet-public/terms.html
+- **Support:** https://packet-tunnels.github.io/packet-public/support.html
+- **Contact:** support@packet-tunnels.app
+
 ## License
 
 This project is provided as-is for research and educational purposes.
