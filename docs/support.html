@@ -4,98 +4,108 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Support - Packet</title>
+    <meta name="description" content="Packet support and contact information.">
     <style>
+        :root {
+            --bg: #0a0a0a;
+            --surface: #111111;
+            --border: #1e1e1e;
+            --primary: #f5f5f5;
+            --secondary: #999;
+            --muted: #555;
+        }
+
+        * { box-sizing: border-box; }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            max-width: 800px;
+            margin: 0;
+            background: var(--bg);
+            color: var(--primary);
+            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            line-height: 1.7;
+        }
+
+        nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 32px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        a { color: var(--primary); }
+        .brand { font-weight: 700; text-decoration: none; }
+        .back { color: var(--secondary); text-decoration: none; font-size: 14px; }
+
+        header, main {
+            max-width: 760px;
             margin: 0 auto;
-            padding: 20px;
-            color: #333;
-            background-color: #f9f9f9;
+            padding: 56px 24px;
         }
-        h1 { color: #0066cc; }
-        h2 { color: #0066cc; margin-top: 30px; }
-        a { color: #0066cc; text-decoration: none; }
-        a:hover { text-decoration: underline; }
-        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .support-card {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 4px;
-            margin: 15px 0;
-            border-left: 4px solid #0066cc;
+
+        header { border-bottom: 1px solid var(--border); }
+        .label {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
         }
-        .contact { background: #f0f7ff; padding: 15px; border-radius: 4px; margin-top: 20px; }
-        code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-family: monospace; }
+
+        h1 {
+            margin: 8px 0 8px;
+            font-size: clamp(32px, 5vw, 48px);
+            line-height: 1.05;
+        }
+
+        .updated { color: var(--muted); font-size: 13px; }
+        section { margin-bottom: 40px; }
+        h2 { font-size: 20px; margin: 0 0 10px; }
+        p, li { color: var(--secondary); font-size: 15px; }
+        ul { padding-left: 22px; }
+        footer {
+            border-top: 1px solid var(--border);
+            color: var(--muted);
+            padding: 28px 24px;
+            text-align: center;
+            font-size: 13px;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Support</h1>
-        <p>Get help with Packet or report issues.</p>
+    <nav>
+        <a class="brand" href="index.html">Packet</a>
+        <a class="back" href="index.html">Back to Home</a>
+    </nav>
 
-        <h2>Documentation</h2>
-        <p>Start with our official documentation:</p>
-        <div class="support-card">
-            <p><strong>Getting Started Guide</strong><br>
-            <a href="https://github.com/Packet-tunnels/packet#getting-started">github.com/Packet-tunnels/packet</a></p>
-        </div>
+    <header>
+        <div class="label">Support</div>
+        <h1>Packet Support</h1>
+        <div class="updated">Last Updated: May 18, 2026</div>
+    </header>
 
-        <h2>Reporting Issues</h2>
-        <p>Found a bug or have a feature request? Please report it on GitHub:</p>
-        <div class="support-card">
-            <p><strong>Issue Tracker</strong><br>
-            <a href="https://github.com/Packet-tunnels/packet/issues">github.com/Packet-tunnels/packet/issues</a></p>
-            <p><em>When reporting an issue, please include:</em></p>
+    <main>
+        <section>
+            <h2>Contact</h2>
+            <p>Email support at <a href="mailto:support@packet-tunnels.app">support@packet-tunnels.app</a>.</p>
+        </section>
+
+        <section>
+            <h2>What to Include</h2>
             <ul>
-                <li>Your device and OS version</li>
-                <li>Packet version number</li>
-                <li>Steps to reproduce the issue</li>
-                <li>Error messages (if any)</li>
+                <li>Your app version and platform.</li>
+                <li>The connection status shown in Packet.</li>
+                <li>Whether the server endpoint is your own server, a CDN edge, or DirectSock.</li>
+                <li>Any error text from the Packet diagnostics screen. Do not send your shared secret.</li>
             </ul>
-        </div>
+        </section>
 
-        <h2>Frequently Asked Questions</h2>
-        <div class="support-card">
-            <h3>How do I set up Packet?</h3>
-            <p>See the <a href="https://github.com/Packet-tunnels/packet#getting-started">Getting Started Guide</a> in our repository.</p>
-        </div>
+        <section>
+            <h2>Privacy</h2>
+            <p>Packet does not ask for your shared secret during support. Keep credentials and private server keys on your own device.</p>
+        </section>
+    </main>
 
-        <div class="support-card">
-            <h3>Is Packet open source?</h3>
-            <p>Yes! The client applications (Android and iOS) are fully open source. You can review the code on <a href="https://github.com/Packet-tunnels/packet">GitHub</a>.</p>
-        </div>
-
-        <div class="support-card">
-            <h3>Does Packet log my activity?</h3>
-            <p>No. Packet operates on a zero-knowledge principle. We do not log, store, or monitor any user activity. See our <a href="privacy.html">Privacy Policy</a> for details.</p>
-        </div>
-
-        <div class="support-card">
-            <h3>How do I deploy Packet?</h3>
-            <p>Use the <code>deploy-vps.sh</code> script in the repository to deploy the server. See the README for detailed instructions.</p>
-        </div>
-
-        <h2>Community</h2>
-        <p>Join our community for discussions and updates:</p>
-        <ul>
-            <li><a href="https://github.com/Packet-tunnels">GitHub Organization</a></li>
-            <li><a href="https://github.com/Packet-tunnels/packet/discussions">GitHub Discussions</a></li>
-        </ul>
-
-        <div class="contact">
-            <h2>Contact Support</h2>
-            <p>For general inquiries or feedback, contact us at:</p>
-            <p><strong><a href="mailto:support@packet-tunnels.app">support@packet-tunnels.app</a></strong></p>
-            <p><em>Please allow 24-48 hours for a response.</em></p>
-        </div>
-
-        <h2>Legal</h2>
-        <ul>
-            <li><a href="privacy.html">Privacy Policy</a></li>
-            <li><a href="terms.html">Terms of Service</a></li>
-        </ul>
-    </div>
+    <footer>(c) 2026 Packet</footer>
 </body>
 </html>

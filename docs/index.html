@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Packet — Secure Network Tunnel</title>
+    <meta name="description" content="Packet is a private, fast, and secure network tunnel for iOS. No tracking. No logs. No compromises.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg: #0a0a0a;
+            --surface: #111111;
+            --surface-border: #1e1e1e;
+            --text-primary: #f5f5f5;
+            --text-secondary: #888;
+            --text-tertiary: #444;
+            --accent: #f5f5f5;
+            --green: #4ade80;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* --- NAV --- */
+        nav {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 40px;
+            background: rgba(10, 10, 10, 0.8);
+            backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--surface-border);
+        }
+
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 700;
+            font-size: 17px;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .nav-logo svg {
+            width: 24px; height: 24px;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            list-style: none;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover { color: var(--text-primary); }
+
+        /* --- HERO --- */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 120px 24px 80px;
+            position: relative;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 10%;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(255,255,255,0.04) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: 1px solid var(--surface-border);
+            border-radius: 100px;
+            padding: 6px 14px;
+            font-size: 12px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+            background: var(--surface);
+        }
+
+        .hero-badge .dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+        }
+
+        h1 {
+            font-size: clamp(48px, 8vw, 88px);
+            font-weight: 800;
+            letter-spacing: -3px;
+            line-height: 1;
+            color: var(--text-primary);
+            margin-bottom: 24px;
+            max-width: 800px;
+        }
+
+        .hero-sub {
+            font-size: clamp(16px, 2.5vw, 20px);
+            color: var(--text-secondary);
+            max-width: 520px;
+            margin-bottom: 48px;
+            font-weight: 400;
+            line-height: 1.7;
+        }
+
+        .cta-group {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--text-primary);
+            color: var(--bg);
+            padding: 14px 28px;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 15px;
+            text-decoration: none;
+            transition: opacity 0.2s, transform 0.2s;
+        }
+
+        .btn-primary:hover { opacity: 0.85; transform: translateY(-1px); }
+
+        .btn-ghost {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--surface-border);
+            padding: 14px 28px;
+            border-radius: 12px;
+            font-weight: 500;
+            font-size: 15px;
+            text-decoration: none;
+            transition: border-color 0.2s, color 0.2s;
+        }
+
+        .btn-ghost:hover {
+            border-color: #444;
+            color: var(--text-primary);
+        }
+
+        /* --- FEATURES --- */
+        .section {
+            padding: 100px 24px;
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+
+        .section-label {
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+            margin-bottom: 16px;
+        }
+
+        .section-title {
+            font-size: clamp(28px, 4vw, 44px);
+            font-weight: 700;
+            letter-spacing: -1.5px;
+            color: var(--text-primary);
+            margin-bottom: 16px;
+        }
+
+        .section-desc {
+            color: var(--text-secondary);
+            font-size: 17px;
+            max-width: 520px;
+            line-height: 1.7;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+            margin-top: 56px;
+        }
+
+        .feature-card {
+            background: var(--surface);
+            border: 1px solid var(--surface-border);
+            border-radius: 20px;
+            padding: 28px;
+            transition: border-color 0.2s;
+        }
+
+        .feature-card:hover { border-color: #2e2e2e; }
+
+        .feature-icon {
+            width: 44px; height: 44px;
+            border-radius: 12px;
+            background: rgba(255,255,255,0.06);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            font-size: 20px;
+        }
+
+        .feature-card h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .feature-card p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.65;
+        }
+
+        /* --- PRIVACY SECTION --- */
+        .privacy-strip {
+            background: var(--surface);
+            border-top: 1px solid var(--surface-border);
+            border-bottom: 1px solid var(--surface-border);
+            padding: 80px 24px;
+        }
+
+        .privacy-strip-inner {
+            max-width: 1100px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 64px;
+            align-items: center;
+        }
+
+        @media (max-width: 768px) {
+            .privacy-strip-inner { grid-template-columns: 1fr; gap: 40px; }
+            nav { padding: 16px 20px; }
+            .nav-links { gap: 20px; }
+        }
+
+        .privacy-list {
+            list-style: none;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            margin-top: 32px;
+        }
+
+        .privacy-list li {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+
+        .privacy-list .check {
+            flex-shrink: 0;
+            margin-top: 3px;
+            color: var(--green);
+            font-size: 16px;
+        }
+
+        .privacy-list span {
+            font-size: 15px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* --- CONTACT --- */
+        #contact {
+            padding: 100px 24px;
+            max-width: 640px;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .contact-card {
+            background: var(--surface);
+            border: 1px solid var(--surface-border);
+            border-radius: 24px;
+            padding: 48px 40px;
+            margin-top: 40px;
+        }
+
+        .contact-card p {
+            color: var(--text-secondary);
+            font-size: 15px;
+            margin-bottom: 24px;
+            line-height: 1.7;
+        }
+
+        .email-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-primary);
+            font-size: 16px;
+            font-weight: 600;
+            text-decoration: none;
+            border-bottom: 1px solid var(--surface-border);
+            padding-bottom: 2px;
+            transition: border-color 0.2s;
+        }
+
+        .email-link:hover { border-color: var(--text-secondary); }
+
+        /* --- FOOTER --- */
+        footer {
+            border-top: 1px solid var(--surface-border);
+            padding: 40px 24px;
+            text-align: center;
+        }
+
+        .footer-links {
+            display: flex;
+            justify-content: center;
+            gap: 32px;
+            list-style: none;
+            margin-bottom: 20px;
+        }
+
+        .footer-links a {
+            color: var(--text-tertiary);
+            text-decoration: none;
+            font-size: 13px;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover { color: var(--text-secondary); }
+
+        footer p {
+            color: var(--text-tertiary);
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- NAV -->
+    <nav>
+        <a href="#" class="nav-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            Packet
+        </a>
+        <ul class="nav-links">
+            <li><a href="#features">Features</a></li>
+            <li><a href="#privacy">Privacy</a></li>
+            <li><a href="support.html">Support</a></li>
+            <li><a href="privacy.html">Privacy Policy</a></li>
+            <li><a href="terms.html">Terms</a></li>
+        </ul>
+    </nav>
+
+    <!-- HERO -->
+    <section class="hero">
+        <div class="hero-badge">
+            <span class="dot"></span>
+            Available on iOS
+        </div>
+        <h1>Private by Design.</h1>
+        <p class="hero-sub">Packet is a high-performance network tunnel built for those who demand privacy, security, and speed. No tracking. No logs. No compromises.</p>
+        <div class="cta-group">
+            <a href="mailto:support@packet-tunnels.app" class="btn-primary">
+                ✉ Get Support
+            </a>
+            <a href="privacy.html" class="btn-ghost">
+                View Privacy Policy →
+            </a>
+        </div>
+    </section>
+
+    <!-- FEATURES -->
+    <div id="features">
+        <div class="section">
+            <p class="section-label">Built for Performance</p>
+            <h2 class="section-title">Everything you need.<br>Nothing you don't.</h2>
+            <p class="section-desc">Configure your own server, connect, and stay private. Packet is intentionally minimal.</p>
+
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="feature-icon">🔒</div>
+                    <h3>Your Server, Your Rules</h3>
+                    <p>Connect to your own server endpoint. No shared infrastructure, no shared risk.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">⚡</div>
+                    <h3>High Performance Core</h3>
+                    <p>The network tunnel is powered by a native, high-performance Rust engine for maximum speed.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🚫</div>
+                    <h3>Zero Tracking</h3>
+                    <p>No analytics SDKs. No advertising frameworks. Your data stays on your device, period.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">📱</div>
+                    <h3>Native iOS App</h3>
+                    <p>Built natively for iOS using SwiftUI. Fast, clean, and perfectly integrated with the system.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">⚙️</div>
+                    <h3>Flexible Transport</h3>
+                    <p>Supports multiple transport modes including HTTP and WebSocket to work around network restrictions.</p>
+                </div>
+                <div class="feature-card">
+                    <div class="feature-icon">🌐</div>
+                    <h3>CDN Relay Support</h3>
+                    <p>Advanced CDN edge routing for users in heavily restricted networks to maintain reliable connectivity.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRIVACY SECTION -->
+    <div id="privacy" class="privacy-strip">
+        <div class="privacy-strip-inner">
+            <div>
+                <p class="section-label">Transparency First</p>
+                <h2 class="section-title">We don't know you.</h2>
+                <p class="section-desc">Packet is designed so that we simply cannot collect data about you. That is a feature, not an oversight.</p>
+            </div>
+            <ul class="privacy-list">
+                <li>
+                    <span class="check">✓</span>
+                    <span><strong style="color:#f5f5f5">Configuration stored on-device only.</strong> Your server URL and shared secret never leave your phone.</span>
+                </li>
+                <li>
+                    <span class="check">✓</span>
+                    <span><strong style="color:#f5f5f5">No account required.</strong> We don't collect your name, email, or any personal information.</span>
+                </li>
+                <li>
+                    <span class="check">✓</span>
+                    <span><strong style="color:#f5f5f5">No analytics or trackers.</strong> The app contains zero third-party tracking or advertising SDKs.</span>
+                </li>
+                <li>
+                    <span class="check">✓</span>
+                    <span><strong style="color:#f5f5f5">Traffic goes through your server.</strong> We operate no shared VPN servers and have no visibility into your traffic.</span>
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    <!-- CONTACT -->
+    <div id="contact">
+        <p class="section-label" style="text-align:center">Support</p>
+        <h2 class="section-title" style="text-align:center">Got a question?</h2>
+        <div class="contact-card">
+            <p>If you have a question about the app, encounter a bug, or need help getting connected, reach out via email. We respond to all messages, typically within 24–48 hours.</p>
+            <a href="mailto:support@packet-tunnels.app" class="email-link">
+                ✉ support@packet-tunnels.app
+            </a>
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        <ul class="footer-links">
+            <li><a href="#features">Features</a></li>
+            <li><a href="#privacy">Privacy</a></li>
+            <li><a href="privacy.html">Privacy Policy</a></li>
+            <li><a href="terms.html">Terms</a></li>
+            <li><a href="support.html">Support</a></li>
+        </ul>
+        <p>© 2026 Packet. All rights reserved.</p>
+    </footer>
+
+</body>
+</html>
