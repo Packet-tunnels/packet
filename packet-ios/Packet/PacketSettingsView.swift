@@ -21,14 +21,6 @@ struct PacketSettingsView: View {
         NavigationStack {
             List {
                 Section {
-                    NavigationLink(destination: PacketServersView(tunnelManager: tunnelManager)) {
-                        SettingsSummaryRow(
-                            systemImage: "server.rack",
-                            title: "Server Profiles",
-                            value: "\(tunnelManager.savedConfigurations.count)"
-                        )
-                    }
-
                     SettingsSummaryRow(
                         systemImage: "point.3.connected.trianglepath.dotted",
                         title: "Default Protocol",
@@ -50,13 +42,7 @@ struct PacketSettingsView: View {
                             ? "\(activeConfiguration.fragmentSizeValue) bytes"
                             : "Off"
                     )
-                } header: {
-                    Text("Configuration")
-                } footer: {
-                    Text("Profile, protocol, transport, and fragmentation settings are configured before connecting.")
-                }
 
-                Section {
                     Button(role: .destructive) {
                         confirmation = .resetSelectedConfiguration
                     } label: {
@@ -76,10 +62,6 @@ struct PacketSettingsView: View {
                         )
                     }
                     .disabled(tunnelManager.isRunning || tunnelManager.savedConfigurations.isEmpty)
-                } header: {
-                    Text("Configuration Actions")
-                } footer: {
-                    Text(tunnelManager.isRunning ? "Disconnect before changing saved configurations." : "Reset clears the selected profile. Delete removes every saved server profile from this device.")
                 }
 
                 Section {
@@ -88,8 +70,6 @@ struct PacketSettingsView: View {
                         title: "Version",
                         value: buildVersionLabel
                     )
-                } header: {
-                    Text("Version")
                 }
 
                 Section {
@@ -104,10 +84,6 @@ struct PacketSettingsView: View {
                     Link(destination: PacketLegalLinks.support) {
                         SettingsLinkRow(systemImage: "questionmark.circle", title: "Support")
                     }
-                } header: {
-                    Text("Legal")
-                } footer: {
-                    Text(PacketComplianceCopy.settingsFooterText)
                 }
             }
             .listStyle(.insetGrouped)
