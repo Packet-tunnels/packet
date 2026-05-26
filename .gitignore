@@ -11,6 +11,18 @@ packet-ios/.build
 *.ipa
 erl_crash.dump
 
+# Rust engine source (binaries only, no source)
+packet-server/src/
+packet-server/Cargo.lock
+packet-relay/src/
+packet-relay/Cargo.lock
+packet-bridge/src/
+packet-bridge/Cargo.lock
+packet-client/src/
+packet-client/Cargo.lock
+packet-proto/src/
+packet-proto/Cargo.lock
+
 # Development tools & IDEs
 .claude/
 .agents/
