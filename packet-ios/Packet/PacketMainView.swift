@@ -393,58 +393,68 @@ struct PacketVPNDisclosureSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 24) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .font(.system(size: 44))
-                                .foregroundStyle(Color.green)
-                                .padding(.bottom, 8)
+            ZStack(alignment: .bottom) {
+                VStack(spacing: 0) {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 24) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Image(systemName: "checkmark.shield.fill")
+                                    .font(.system(size: 44))
+                                    .foregroundStyle(Color.green)
+                                    .padding(.bottom, 8)
 
-                            Text("VPN Data-Use Disclosure")
-                                .font(.system(size: 24, weight: .bold))
-                                .foregroundStyle(.primary)
+                                Text("VPN Data-Use Disclosure")
+                                    .font(.system(size: 24, weight: .bold))
+                                    .foregroundStyle(.primary)
 
-                            Text(PacketComplianceCopy.disclosureIntro)
-                                .font(.system(size: 15))
-                                .foregroundStyle(.secondary)
-                                .lineSpacing(2)
-                        }
-
-                        VStack(spacing: 12) {
-                            ForEach(PacketComplianceCopy.summaryItems) { item in
-                                PacketDisclosureSummaryCard(item: item)
+                                Text(PacketComplianceCopy.disclosureIntro)
+                                    .font(.system(size: 15))
+                                    .foregroundStyle(.secondary)
+                                    .lineSpacing(2)
                             }
+
+                            VStack(spacing: 12) {
+                                ForEach(PacketComplianceCopy.summaryItems) { item in
+                                    PacketDisclosureSummaryCard(item: item)
+                                }
+                            }
+
+                            Text(PacketComplianceCopy.disclosureOutro)
+                                .font(.system(size: 14))
+                                .foregroundStyle(.tertiary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-
-                        Text(PacketComplianceCopy.disclosureOutro)
-                            .font(.system(size: 14))
-                            .foregroundStyle(.tertiary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 28)
+                        .padding(.top, 32)
+                        .padding(.bottom, 120)
                     }
-                    .padding(.horizontal, 28)
-                    .padding(.top, 32)
-                    .padding(.bottom, 20)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Color(uiColor: .systemGroupedBackground))
 
-                HStack(spacing: 12) {
-                    Button("Cancel", action: onDismiss)
+                VStack(spacing: 0) {
+                    Divider()
+
+                    HStack(spacing: 10) {
+                        Button(action: onDismiss) {
+                            Text("Cancel")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
                         .buttonStyle(.bordered)
-                        .controlSize(.large)
                         .frame(maxWidth: .infinity)
 
-                    Button("OK", action: onAccept)
+                        Button(action: onAccept) {
+                            Text("OK")
+                                .font(.system(size: 15, weight: .semibold))
+                        }
                         .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
                         .frame(maxWidth: .infinity)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
                 }
-                .padding(28)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))
-                .shadow(color: Color.black.opacity(0.05), radius: 10, x: 0, y: -5)
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
             .navigationBarTitleDisplayMode(.inline)
         }
         .presentationDetents([.large])
