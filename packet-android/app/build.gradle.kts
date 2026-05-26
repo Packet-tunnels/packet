@@ -4,12 +4,12 @@ plugins {
 }
 
 android {
-    namespace = "com.resolo.packet"
+    namespace = "com.packet.app"
     compileSdk = 35
     ndkVersion = "27.1.12297006"
 
     defaultConfig {
-        applicationId = "com.resolo.packet"
+        applicationId = "com.packet.app"
         minSdk = 24
         targetSdk = 35
         versionCode = 1
@@ -43,17 +43,7 @@ android {
             jniLibs.srcDir("src/main/jniLibs")
         }
     }
-
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-        }
-    }
 }
 
 dependencies {
-    val psiphonCoreAar = file("libs/psiphon-tunnel-core.aar")
-    if (psiphonCoreAar.exists()) {
-        implementation(files(psiphonCoreAar))
-    }
 }

@@ -1,6 +1,6 @@
 name: Packet
 options:
-  bundleIdPrefix: com.resolo.packet
+  bundleIdPrefix: com.packet.app
 schemes:
   Packet:
     build:
@@ -35,13 +35,13 @@ targets:
       CODE_SIGN_STYLE: Automatic
       CODE_SIGN_IDENTITY: "Apple Development"
       CODE_SIGN_ENTITLEMENTS: Packet/Packet.entitlements
-      DEVELOPMENT_TEAM: BXY4DH6H7D
       GENERATE_INFOPLIST_FILE: YES
       INFOPLIST_KEY_CFBundleDisplayName: Packet
       INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: YES
       INFOPLIST_KEY_UILaunchScreen_Generation: YES
+      INFOPLIST_KEY_UIRequiresFullScreen: YES
       MARKETING_VERSION: 1.0.0
-      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.packet
+      PRODUCT_BUNDLE_IDENTIFIER: com.packet
       PRODUCT_NAME: Packet
       SWIFT_VERSION: 5.0
       SWIFT_OBJC_BRIDGING_HEADER: Packet/Packet-Bridging-Header.h
@@ -71,22 +71,16 @@ targets:
       - SharedTunnel
     resources:
       - PacketTunnel/PrivacyInfo.xcprivacy
-      - path: PacketTunnel/Resources/psiphon
-        type: folder
-    dependencies:
-      - framework: Frameworks/PsiphonTunnel.xcframework
-        embed: true
     settings:
       APPLICATION_EXTENSION_API_ONLY: YES
       CURRENT_PROJECT_VERSION: 1
       CODE_SIGN_STYLE: Automatic
       CODE_SIGN_IDENTITY: "Apple Development"
       CODE_SIGN_ENTITLEMENTS: PacketTunnel/PacketTunnel.entitlements
-      DEVELOPMENT_TEAM: BXY4DH6H7D
       GENERATE_INFOPLIST_FILE: NO
       INFOPLIST_FILE: PacketTunnel/Info.plist
       MARKETING_VERSION: 1.0.0
-      PRODUCT_BUNDLE_IDENTIFIER: com.resolo.packet.PacketTunnel
+      PRODUCT_BUNDLE_IDENTIFIER: com.packet.app.PacketTunnel
       PRODUCT_NAME: PacketTunnel
       SKIP_INSTALL: YES
       SWIFT_VERSION: 5.0

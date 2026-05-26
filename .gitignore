@@ -1,18 +1,83 @@
+# Build artifacts
 /target
-Cargo.lock
-*.swp
-*.swo
-.env
-.DS_Store
-packet-ios/*.xcodeproj
-packet-ios/*.xcodeproj/xcuserdata
-packet-ios/*.xcodeproj/project.xcworkspace/xcuserdata
-packet-ios/.build
+/build
 packet-android/.gradle
 packet-android/build
 packet-android/app/build
-packet-android/.psiphon-core-lab
-packet-android/app/libs/psiphon-tunnel-core.aar
-packet-android/app/src/main/assets/psiphon/client.config
-packet-ios/Frameworks/PsiphonTunnel.xcframework
-packet-ios/PacketTunnel/Resources/psiphon/client.config
+packet-ios/.build
+*.beam
+*.so
+*.apk
+*.ipa
+erl_crash.dump
+
+# Dependencies
+Cargo.lock
+node_modules/
+Pods/
+vendor/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.jks
+*.p8
+google-services.json
+GoogleService-Info.plist
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+packet-ios/*.xcodeproj
+packet-ios/*.xcodeproj/xcuserdata
+packet-ios/*.xcodeproj/project.xcworkspace/xcuserdata
+packet-ios/*.xcworkspace/xcuserdata
+
+# Android
+packet-android/.gradle/
+packet-android/local.properties
+packet-android/build/
+packet-android/app/build/
+
+# Cache & temp
+.swift-module-cache/
+.gradle/
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+
+# Test artifacts
+*_test.json
+test_*.py
+*_test.swift
+.coverage
+coverage/
+htmlcov/
+
+# System
+Thumbs.db
+*.log
+*.tmp
+
+# Docker & deployment
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Sensitive data
+*.pem
+*.key
+secrets.env
+packet-secrets.env
