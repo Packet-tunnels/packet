@@ -76,8 +76,21 @@ Dockerfile
 docker-compose.yml
 .dockerignore
 
-# Sensitive data
+# Sensitive data & credentials
 *.pem
 *.key
 secrets.env
 packet-secrets.env
+*.properties
+config.local.*
+*.credentials
+*.token
+.auth/
+
+# Build outputs (may contain hardcoded values)
+build-output.log
+compile-output.log
+
+# Files with hardcoded URLs or credentials
+packet-android/app/src/main/java/com/packet/app/TunnelModels.kt.backup
+packet-ios/SharedTunnel/TunnelSupport.swift.backup
