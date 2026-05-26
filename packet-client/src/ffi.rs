@@ -308,7 +308,7 @@ pub extern "C" fn phantom_copy_mesh_stats_json() -> *mut c_char {
         .into_raw()
 }
 
-/// Runs the connection diagnostic against the given carrier URI and
+/// Runs the connection diagnostic against the given trojan:// URI and
 /// returns a human-readable report. The caller MUST free the returned
 /// string with `phantom_free_string`. Blocks until the probe completes
 /// (a few seconds). Intended to be called off the UI thread.
@@ -399,8 +399,7 @@ pub extern "C" fn phantom_start_layered_carrier_full(
     };
 
     tracing::info!(
-        "[carrier] Starting DirectSock {} bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
-        config.protocol.label(),
+        "[carrier] Starting DirectSock Trojan bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
         actual_port,
         config.fragment_tls_hello,
         config.fragment_size_hint
@@ -851,8 +850,7 @@ pub mod android {
                 };
 
             tracing::info!(
-                "[carrier] Starting DirectSock {} bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
-                config.protocol.label(),
+                "[carrier] Starting DirectSock Trojan bridge on 127.0.0.1:{} fragment_tls_hello={} fragment_hint={}",
                 actual_port,
                 config.fragment_tls_hello,
                 config.fragment_size_hint

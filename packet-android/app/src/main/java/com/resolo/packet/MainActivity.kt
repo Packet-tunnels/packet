@@ -50,9 +50,6 @@ private data class StatusPalette(
     val bannerText: Int,
 )
 
-private const val ADD_MENU_PASTE = 1
-private const val ADD_MENU_MANUAL = 2
-
 class MainActivity : Activity() {
     private enum class RootTab {
         STATUS,
@@ -152,13 +149,6 @@ class MainActivity : Activity() {
     private var serversEditMode = false
     private var currentConfiguration = TunnelConfiguration()
 
-    /**
-     * One-shot per process: when the user lands on the app and the selected
-     * profile is the built-in Packet Chain, kick off Connect automatically
-     * so they don't have to tap. Resets to false in `onCreate` so a fresh
-     * launch always tries once.
-     */
-    private var autoConnectAttempted = false
     private var currentConfigurationEntry: SavedTunnelConfiguration? = null
     private var activeConfigurationId: String? = null
     private var activeConfigurationSnapshot: TunnelConfiguration? = null
@@ -331,7 +321,7 @@ class MainActivity : Activity() {
         navHome.setOnClickListener { selectRootTab(RootTab.STATUS) }
         navServers.setOnClickListener { selectRootTab(RootTab.SERVERS) }
         navSettings.setOnClickListener { selectRootTab(RootTab.SETTINGS) }
-        serversAddButton.setOnClickListener { showAddConfigurationMenu(it) }
+        serversAddButton.setOnClickListener { showConfigurationEditor(existing = null) }
         serversEditButton.setOnClickListener { toggleServersEditMode() }
         settingsPrivacyLinkRow.setOnClickListener { openUrl(PRIVACY_URL) }
         settingsTermsLinkRow.setOnClickListener { openUrl(TERMS_URL) }
@@ -352,7 +342,7 @@ class MainActivity : Activity() {
         testOutputCopyButton.setOnClickListener { copyTestOutputToClipboard() }
 
         disclosureReminderCard.setOnClickListener {
-            showDisclosureDialog(isConnectFlow = false)
+            showDisclosureDialog()
         }
 
         toggleLogsButton.setOnClickListener {
@@ -424,26 +414,6 @@ class MainActivity : Activity() {
         renderSettingsPage()
         renderState()
         renderDashboard()
-        maybeAutoConnectOnLaunch()
-    }
-
-    /**
-     * If the selected profile is one of the built-in chain profiles and the tunnel
-     * is currently idle (cold launch, or a previous run failed), trigger
-     * the Connect action automatically. Fires at most once per process so
-     * the user can still cancel and stay disconnected.
-     */
-    private fun maybeAutoConnectOnLaunch() {
-        if (autoConnectAttempted) return
-        if (!currentConfiguration.usesPacketChain && !currentConfiguration.usesPsiphonChain) return
-        val state = TunnelPreferences.loadSnapshot(this).state
-        if (state != TunnelState.IDLE && state != TunnelState.FAILED) return
-        autoConnectAttempted = true
-        TunnelLogStore.append(
-            this,
-            "[AUTO-CONNECT] ${currentConfiguration.ingressLabel} selected — starting tunnel automatically.",
-        )
-        requestConnect()
     }
 
     override fun onStop() {
@@ -646,10 +616,7 @@ class MainActivity : Activity() {
 
     private fun requestConnect() {
         if (!TunnelPreferences.isVpnDisclosureAcknowledged(this)) {
-            showDisclosureDialog(
-                isConnectFlow = true,
-                onAccept = { requestConnectInternal() },
-            )
+            showDisclosureDialog(onAccept = { requestConnectInternal() })
             return
         }
 
@@ -1053,7 +1020,7 @@ class MainActivity : Activity() {
         val current = currentConfiguration
         settingsProfilesSummaryText.text = TunnelPreferences.loadSavedConfigurations(this).size.toString()
         settingsProtocolSummaryText.text = displayStackMode(current.stackMode)
-        settingsTransportSummaryText.text = if (current.usesCustomCarrier || current.usesPacketChain || current.usesPsiphonChain || current.usesPrivateRelay) {
+        settingsTransportSummaryText.text = if (current.usesCustomCarrier || current.usesPacketChain || current.usesPrivateRelay) {
             current.ingressLabel
         } else {
             displayTransportMode(current.transportMode)
@@ -1068,7 +1035,7 @@ class MainActivity : Activity() {
 
     private fun buildRowSubtitle(savedConfiguration: SavedTunnelConfiguration, isSelected: Boolean): String {
         val configuration = savedConfiguration.configuration
-        val endpoint = if (configuration.usesCustomCarrier || configuration.usesPacketChain || configuration.usesPsiphonChain) {
+        val endpoint = if (configuration.usesCustomCarrier || configuration.usesPacketChain) {
             configuration.normalizedTrojanCarrierUri
         } else if (configuration.usesPrivateRelay) {
             configuration.normalizedServerUrl
@@ -1089,7 +1056,6 @@ class MainActivity : Activity() {
             TunnelStackMode.CUSTOM_TROJAN_CARRIER -> "DirectSock"
             TunnelStackMode.PACKET_CHAIN -> "Packet Chain"
             TunnelStackMode.PRIVATE_RELAY -> "Private Relay"
-            TunnelStackMode.PSIPHON_CHAIN -> "Psiphon Escape"
         }
     }
 
@@ -1340,14 +1306,9 @@ class MainActivity : Activity() {
             snapshot.state == TunnelState.DISCONNECTING
     }
 
-    private fun showDisclosureDialog(
-        isConnectFlow: Boolean,
-        onAccept: (() -> Unit)? = null,
-    ) {
+    private fun showDisclosureDialog(onAccept: (() -> Unit)? = null) {
         VpnDisclosureDialogs.show(
             activity = this,
-            acceptTitle = if (isConnectFlow) "Accept & Connect" else "Acknowledge",
-            dismissTitle = if (isConnectFlow) "Not Now" else "Dismiss",
             onAccept = {
                 onAccept?.invoke()
                 renderState()
@@ -1381,77 +1342,14 @@ class MainActivity : Activity() {
         selectRootTab(RootTab.EDITOR)
     }
 
-    private fun showAddConfigurationMenu(anchor: View) {
-        PopupMenu(this, anchor, android.view.Gravity.END).apply {
-            menu.add(0, ADD_MENU_PASTE, 0, "Paste from clipboard")
-            menu.add(0, ADD_MENU_MANUAL, 1, "Manual")
-            setOnMenuItemClickListener { item ->
-                when (item.itemId) {
-                    ADD_MENU_PASTE -> {
-                        importConfigurationFromClipboard()
-                        true
-                    }
-                    ADD_MENU_MANUAL -> {
-                        showConfigurationEditor(existing = null)
-                        true
-                    }
-                    else -> false
-                }
-            }
-            show()
-        }
-    }
-
-    private fun importConfigurationFromClipboard() {
-        val clipboard = getSystemService(ClipboardManager::class.java)
-        val clipboardText = clipboard
-            ?.primaryClip
-            ?.takeIf { it.itemCount > 0 }
-            ?.getItemAt(0)
-            ?.coerceToText(this)
-            ?.toString()
-            .orEmpty()
-
-        if (clipboardText.isBlank()) {
-            Toast.makeText(this, "Clipboard is empty.", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        val imported = TunnelConfiguration.importedFromText(clipboardText)
-        if (imported == null) {
-            Toast.makeText(
-                this,
-                "Clipboard does not contain a supported trojan://, vless://, or V2Ray VLESS config.",
-                Toast.LENGTH_LONG,
-            ).show()
-            return
-        }
-
-        val saved = TunnelPreferences.addConfiguration(
-            context = this,
-            name = imported.name,
-            configuration = imported.configuration,
-        )
-        refreshConfigurationState()
-        renderServersPage()
-        renderSettingsPage()
-        renderConfigurationSummary()
-        renderDashboard()
-        selectRootTab(RootTab.SERVERS)
-        Toast.makeText(this, "Added ${saved.displayName}", Toast.LENGTH_SHORT).show()
-    }
-
     private fun renderEditorMode() {
         val isDirectSock = editorStackMode == TunnelStackMode.CUSTOM_TROJAN_CARRIER
         val isPacketChain = editorStackMode == TunnelStackMode.PACKET_CHAIN
-        val isPsiphonChain = editorStackMode == TunnelStackMode.PSIPHON_CHAIN
         val isPrivateRelay = editorStackMode == TunnelStackMode.PRIVATE_RELAY
         editorStackValue.text = displayStackMode(editorStackMode)
         editorPacketNativeSection.visibility = if (isDirectSock) View.GONE else View.VISIBLE
-        editorDirectSockSection.visibility = if (isDirectSock || isPacketChain || isPsiphonChain) View.VISIBLE else View.GONE
+        editorDirectSockSection.visibility = if (isDirectSock || isPacketChain) View.VISIBLE else View.GONE
         editorTransportRow.text = when {
-            isPacketChain -> "Transport      Auto through carrier"
-            isPsiphonChain -> "Transport      Auto through Psiphon"
             isPrivateRelay -> "Transport      Private WebSocket relay"
             else -> "Transport      ${displayTransportMode(editorTransportMode)}"
         }
@@ -1518,7 +1416,7 @@ class MainActivity : Activity() {
         }
 
         hasPresentedInitialDisclosure = true
-        showDisclosureDialog(isConnectFlow = false)
+        showDisclosureDialog()
     }
 
     private fun statusPalette(snapshot: TunnelSnapshot): StatusPalette {

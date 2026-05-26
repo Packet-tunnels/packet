@@ -51,11 +51,6 @@ class TunnelVpnService : VpnService() {
         }
     }
 
-    private data class CarrierLayerStart(
-        val listenPort: Int,
-        val upstreamProxyUrl: String,
-    )
-
     override fun onCreate() {
         super.onCreate()
         ensureNotificationChannel()
@@ -285,7 +280,7 @@ class TunnelVpnService : VpnService() {
         )
         TunnelLogStore.append(
             this,
-            "[DIAG] UDP and Android Private DNS are not supported end-to-end yet; UDP-heavy apps may fail or retry repeatedly",
+            "[DIAG] IPv6 is captured by the VPN to prevent direct network leaks; UDP and Android Private DNS are not supported end-to-end yet",
         )
 
         TunnelPreferences.updateDiagnostics(
@@ -431,8 +426,6 @@ class TunnelVpnService : VpnService() {
     private fun closeInterface() {
         runCatching { PacketBridge.stopTun2Socks() }
         runCatching { PacketBridge.stopClient() }
-        runCatching { PsiphonCoreLab.stopLocalProxy { message -> TunnelLogStore.append(this, message) } }
-        runCatching { RealityCore.stopLocalProxy { message -> TunnelLogStore.append(this, message) } }
         runCatching { PacketBridge.stopLayeredCarrier() }
         runCatching { vpnInterface?.close() }
         vpnInterface = null
@@ -443,8 +436,10 @@ class TunnelVpnService : VpnService() {
             .setSession("Packet")
             .setMtu(VPN_MTU)
             .addAddress(VPN_TUN_ADDRESS, VPN_TUN_PREFIX)
+            .addAddress(VPN_TUN_IPV6_ADDRESS, VPN_TUN_IPV6_PREFIX)
             .addDnsServer(VPN_DNS_SERVER)
             .addRoute("0.0.0.0", 0)
+            .addRoute("::", 0)
 
         runCatching {
             builder.addDisallowedApplication(packageName)
@@ -456,7 +451,7 @@ class TunnelVpnService : VpnService() {
 
         TunnelLogStore.append(
             this,
-            "[VPN] Routing IPv4 traffic through Android VpnService and excluding $packageName to avoid tunnel loops",
+            "[VPN] Routing IPv4 and IPv6 traffic through Android VpnService and excluding $packageName to avoid tunnel loops",
         )
         return builder
     }
@@ -536,58 +531,19 @@ class TunnelVpnService : VpnService() {
         )
     }
 
-    private fun startCarrierLayer(
-        configuration: TunnelConfiguration,
-        effectiveCarrierUri: String,
-    ): CarrierLayerStart {
-        if (configuration.usesRealityCarrier) {
-            val reality = RealityCore.startLocalProxy(
-                context = this,
-                carrierUri = effectiveCarrierUri,
-                requestedSocksPort = configuration.carrierProxyPortValue,
-            ) { message ->
-                TunnelLogStore.append(this, message)
-            }
-
-            if (!reality.started || reality.socksPort == null) {
-                throw IllegalStateException(reality.error ?: "VLESS Reality carrier failed to expose a local SOCKS proxy.")
-            }
-
-            return CarrierLayerStart(
-                listenPort = reality.socksPort,
-                upstreamProxyUrl = reality.httpPort
-                    ?.let { "http://127.0.0.1:$it" }
-                    ?: "socks5://127.0.0.1:${reality.socksPort}",
-            )
-        }
-
-        val listenPort = PacketBridge.startLayeredCarrierFull(
-            effectiveCarrierUri,
-            configuration.carrierProxyPortValue,
-            configuration.fragmentEnabled,
-            configuration.fragmentSizeValue,
-        )
-        return CarrierLayerStart(
-            listenPort = listenPort,
-            upstreamProxyUrl = "http://127.0.0.1:$listenPort",
-        )
-    }
-
     private fun startRustCore(configuration: TunnelConfiguration): Int {
-        // Iran cellular carriers (IranCell, etc.) advertise an HTTP proxy on
-        // the APN that foreign-IP traffic MUST traverse to escape the
-        // network blackhole. Detect it here and chain the carrier
-        // through it via `upstream_http=`. Operator-set upstreams in the URI
-        // are preserved unchanged.
+        // Some networks require traffic to route through a system-configured proxy.
+        // Detect the proxy here and chain the carrier through it via `upstream_http=`.
+        // Operator-set upstreams in the URI are preserved unchanged.
         val systemProxy = SystemProxyDetector.detect(this)
-        val effectiveCarrierUri = run {
-            val base = configuration.executableCarrierUri
+        val effectiveTrojanUri = run {
+            val base = configuration.normalizedTrojanCarrierUri
             if (systemProxy != null) {
                 val rewritten = SystemProxyDetector.appendToTrojanUri(base, systemProxy)
                 if (rewritten != base) {
                     TunnelLogStore.append(
                         this,
-                        "[CHAIN] System HTTP proxy detected ($systemProxy) — routing carrier via it",
+                        "[CHAIN] System HTTP proxy detected ($systemProxy) — routing Trojan carrier via it",
                     )
                 }
                 rewritten
@@ -597,24 +553,33 @@ class TunnelVpnService : VpnService() {
         }
 
         if (configuration.usesCustomCarrier) {
-            return startCarrierLayer(configuration, effectiveCarrierUri).listenPort
+            return PacketBridge.startLayeredCarrierFull(
+                effectiveTrojanUri,
+                configuration.carrierProxyPortValue,
+                configuration.fragmentEnabled,
+                configuration.fragmentSizeValue,
+            )
         }
 
         if (configuration.usesPacketChain) {
-            val carrier = startCarrierLayer(configuration, effectiveCarrierUri)
-            val carrierPort = carrier.listenPort
+            val carrierPort = PacketBridge.startLayeredCarrierFull(
+                effectiveTrojanUri,
+                configuration.carrierProxyPortValue,
+                configuration.fragmentEnabled,
+                configuration.fragmentSizeValue,
+            )
             if (carrierPort <= 0) {
                 TunnelLogStore.append(
                     this,
-                    "[CHAIN] ${configuration.carrierProtocolLabel} carrier failed to start before Packet escape layer (code $carrierPort)",
+                    "[CHAIN] DirectSock carrier failed to start before Packet escape layer (code $carrierPort)",
                 )
                 return carrierPort
             }
 
-            val upstreamProxy = carrier.upstreamProxyUrl
+            val upstreamProxy = "http://127.0.0.1:$carrierPort"
             TunnelLogStore.append(
                 this,
-                "[CHAIN] ${configuration.carrierProtocolLabel} carrier is listening on 127.0.0.1:$carrierPort; starting Packet ${configuration.transportMode.title} through $upstreamProxy",
+                "[CHAIN] DirectSock carrier is listening on 127.0.0.1:$carrierPort; starting Packet ${configuration.transportMode.title} through it",
             )
 
             return PacketBridge.startClientFull(
@@ -627,64 +592,13 @@ class TunnelVpnService : VpnService() {
                 // Hand the configured transport mode straight through; the
                 // chain default is AUTO so the Rust rotation supervisor
                 // (run_rotating_transport) sweeps WS / Obfs / QUIC across
-                // ports until something punches through. Hardcoding MEEK
-                // here would lock us to a single shape that Iran RSTs.
+                // ports until something punches through. Single-protocol mode
+                // may not work on networks with multiple blocking strategies.
                 configuration.transportMode.rawValue,
                 configuration.fragmentEnabled,
                 configuration.fragmentSizeValue,
                 configuration.normalizedObfsKey,
                 upstreamProxy,
-            )
-        }
-
-        if (configuration.usesPsiphonChain) {
-            val carrier = startCarrierLayer(configuration, effectiveCarrierUri)
-            val carrierPort = carrier.listenPort
-            if (carrierPort <= 0) {
-                TunnelLogStore.append(
-                    this,
-                    "[PSIPHON-CHAIN] ${configuration.carrierProtocolLabel} carrier failed to start before Psiphon escape layer (code $carrierPort)",
-                )
-                return carrierPort
-            }
-
-            val psiphonUpstreamProxy = carrier.upstreamProxyUrl
-            TunnelLogStore.append(
-                this,
-                "[PSIPHON-CHAIN] ${configuration.carrierProtocolLabel} carrier is listening on 127.0.0.1:$carrierPort; starting Psiphon through $psiphonUpstreamProxy",
-            )
-
-            val psiphon = PsiphonCoreLab.startLocalProxy(
-                context = this,
-                upstreamProxyUrl = psiphonUpstreamProxy,
-                requestedHttpPort = PacketDefaultProfiles.PSIPHON_LOCAL_HTTP_PORT,
-                requestedSocksPort = PacketDefaultProfiles.PSIPHON_LOCAL_SOCKS_PORT,
-            ) { message ->
-                TunnelLogStore.append(this, message)
-            }
-
-            if (!psiphon.started || psiphon.httpPort == null) {
-                throw IllegalStateException(psiphon.error ?: "Psiphon core failed to expose a local HTTP proxy.")
-            }
-
-            val packetUpstreamProxy = "http://127.0.0.1:${psiphon.httpPort}"
-            TunnelLogStore.append(
-                this,
-                "[PSIPHON-CHAIN] Psiphon HTTP proxy is ready on 127.0.0.1:${psiphon.httpPort}; starting Packet ${configuration.transportMode.title} through Psiphon",
-            )
-
-            return PacketBridge.startClientFull(
-                configuration.normalizedServerUrl,
-                configuration.normalizedSecret,
-                configuration.listenPortValue ?: 0,
-                configuration.normalizedCdnEdge,
-                configuration.normalizedHostOverride,
-                configuration.normalizedSniOverride,
-                configuration.transportMode.rawValue,
-                configuration.fragmentEnabled,
-                configuration.fragmentSizeValue,
-                configuration.normalizedObfsKey,
-                packetUpstreamProxy,
             )
         }
 
@@ -762,8 +676,6 @@ class TunnelVpnService : VpnService() {
             CARRIER_EGRESS_TIMEOUT_MS
         } else if (configuration.usesPacketChain) {
             CARRIER_EGRESS_TIMEOUT_MS
-        } else if (configuration.usesPsiphonChain) {
-            CARRIER_EGRESS_TIMEOUT_MS
         } else if (configuration.usesPrivateRelay) {
             CARRIER_EGRESS_TIMEOUT_MS
         } else {
@@ -773,7 +685,6 @@ class TunnelVpnService : VpnService() {
         val deadline = startedAt + timeoutMs
         val label = when {
             configuration.usesPrivateRelay -> "Private Relay"
-            configuration.usesPsiphonChain -> "Psiphon Chain"
             configuration.usesPacketChain -> "Packet Chain"
             configuration.usesCustomCarrier -> "DirectSock"
             else -> "tunnel"
@@ -1023,10 +934,10 @@ class TunnelVpnService : VpnService() {
 
     private fun performPreflightDiagnostics(configuration: TunnelConfiguration): TunnelDiagnosticsSnapshot {
         val endpointProbe = runOnWorkerThread { probeEndpoint(configuration.endpointHost, configuration.endpointPort) }
-        val healthProbe = if (configuration.usesPacketChain || configuration.usesPsiphonChain) {
+        val healthProbe = if (configuration.usesPacketChain) {
             HealthProbe(
-                status = "Health skipped for ${if (configuration.usesPsiphonChain) "Psiphon Chain" else "Packet Chain"}",
-                error = "Direct Packet server health is intentionally skipped; the Packet escape layer dials through a local first-hop carrier.",
+                status = "Health skipped for Packet Chain",
+                error = "Direct Packet server health is intentionally skipped; the Packet escape layer dials through the local DirectSock carrier.",
             )
         } else {
             runOnWorkerThread { probeHealth(configuration.normalizedServerUrl) }
@@ -1079,7 +990,7 @@ class TunnelVpnService : VpnService() {
         if (configuration.usesCustomCarrier) {
             TunnelLogStore.append(
                 this,
-                "[DIAG] Config summary: stack=directsock carrier=${configuration.carrierProtocolLabel} endpoint=${configuration.endpointHost}:${configuration.endpointPort} " +
+                "[DIAG] Config summary: stack=directsock_trojan endpoint=${configuration.endpointHost}:${configuration.endpointPort} " +
                     "local_proxy=${configuration.carrierProxyPortValue}",
             )
             TunnelLogStore.append(this, "[DIAG] Device clock: ${deviceClockSummary()}")
@@ -1091,28 +1002,12 @@ class TunnelVpnService : VpnService() {
         if (configuration.usesPacketChain) {
             TunnelLogStore.append(
                 this,
-                "[DIAG] Config summary: stack=packet_chain carrier=${configuration.carrierProtocolLabel} endpoint=${configuration.endpointHost}:${configuration.endpointPort} " +
+                "[DIAG] Config summary: stack=packet_chain carrier=${configuration.endpointHost}:${configuration.endpointPort} " +
                     "carrier_local_port=${configuration.carrierProxyPortValue} packet_edge=${configuration.normalizedCdnEdge} " +
                     "packet_server=${configuration.normalizedServerUrl} fragment=${configuration.fragmentEnabled} " +
                     "fragment_size=${configuration.fragmentSizeValue} secret=${redactSecret(configuration.normalizedSecret)}",
             )
-            TunnelLogStore.append(this, "[DIAG] Chain flow: app VPN -> Packet WebSocket SOCKS -> local ${configuration.carrierProtocolLabel} carrier -> Packet server")
-            TunnelLogStore.append(this, "[DIAG] Device clock: ${deviceClockSummary()}")
-            TunnelLogStore.append(this, "[DIAG] Active network: ${activeNetworkSummary()}")
-            TunnelLogStore.append(this, "[DIAG] Android Private DNS: ${privateDnsSummary()}")
-            return
-        }
-
-        if (configuration.usesPsiphonChain) {
-            TunnelLogStore.append(
-                this,
-                "[DIAG] Config summary: stack=psiphon_chain carrier=${configuration.carrierProtocolLabel} endpoint=${configuration.endpointHost}:${configuration.endpointPort} " +
-                    "carrier_local_port=${configuration.carrierProxyPortValue} psiphon_http=${PacketDefaultProfiles.PSIPHON_LOCAL_HTTP_PORT} " +
-                    "psiphon_socks=${PacketDefaultProfiles.PSIPHON_LOCAL_SOCKS_PORT} packet_edge=${configuration.normalizedCdnEdge} " +
-                    "packet_server=${configuration.normalizedServerUrl} fragment=${configuration.fragmentEnabled} " +
-                    "fragment_size=${configuration.fragmentSizeValue} secret=${redactSecret(configuration.normalizedSecret)}",
-            )
-            TunnelLogStore.append(this, "[DIAG] Chain flow: app VPN -> Packet SOCKS -> local Psiphon HTTP proxy -> local ${configuration.carrierProtocolLabel} carrier -> Psiphon server -> Packet server")
+            TunnelLogStore.append(this, "[DIAG] Chain flow: app VPN -> Packet WebSocket SOCKS -> local DirectSock HTTP CONNECT -> Trojan/Cloudflare carrier -> Packet server")
             TunnelLogStore.append(this, "[DIAG] Device clock: ${deviceClockSummary()}")
             TunnelLogStore.append(this, "[DIAG] Active network: ${activeNetworkSummary()}")
             TunnelLogStore.append(this, "[DIAG] Android Private DNS: ${privateDnsSummary()}")
@@ -1125,7 +1020,7 @@ class TunnelVpnService : VpnService() {
                 "[DIAG] Config summary: stack=private_relay vps=${configuration.normalizedServerUrl} " +
                     "listen_port=${configuration.listenPort.ifBlank { "auto" }} secret=${redactSecret(configuration.normalizedSecret)}",
             )
-            TunnelLogStore.append(this, "[DIAG] Chain flow: app VPN -> private Iran VPS -> authenticated reverse Starlink relay -> internet")
+            TunnelLogStore.append(this, "[DIAG] Chain flow: app VPN -> server -> authenticated relay -> internet")
             TunnelLogStore.append(this, "[DIAG] Risk controls: public Trojan=off, decoy=off, padding=off, multi-lane=off")
             TunnelLogStore.append(this, "[DIAG] Device clock: ${deviceClockSummary()}")
             TunnelLogStore.append(this, "[DIAG] Active network: ${activeNetworkSummary()}")
@@ -1172,14 +1067,12 @@ class TunnelVpnService : VpnService() {
         when (diagnostics.endpointReachable) {
             true -> parts.add("Endpoint reachable (${diagnostics.endpointLatencyMs}ms).")
             false -> {
-                val routeHint = if (configuration.usesPsiphonChain) {
-                    "The ${configuration.carrierProtocolLabel} carrier or embedded Psiphon local proxy is not reachable, so Packet cannot bootstrap through Psiphon."
-                } else if (configuration.usesPacketChain) {
-                    "The ${configuration.carrierProtocolLabel} carrier is not reachable, so the Packet escape layer cannot bootstrap."
+                val routeHint = if (configuration.usesPacketChain) {
+                    "The Trojan/Cloudflare carrier is not reachable, so the Packet escape layer cannot bootstrap."
                 } else if (configuration.usesCdn) {
                     "Check the reachable ingress: CDN edge, domestic bridge, host override, SNI override, or upstream origin."
                 } else {
-                    "The configured endpoint is not reachable from this network. In Iran, direct foreign endpoints often fail; use a domestic bridge or a fronted CDN edge."
+                    "The configured endpoint is not reachable from this network. Try using a domestic bridge or a fronted CDN edge."
                 }
                 parts.add("Endpoint unreachable. $routeHint")
             }
@@ -1194,9 +1087,7 @@ class TunnelVpnService : VpnService() {
 
         if (diagnostics.localProxyReady && diagnostics.vpnShellReady) {
             parts.add(
-                if (configuration.usesPsiphonChain) {
-                    "Full-device forwarding is active. Device traffic is routed through Packet over Psiphon Chain on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
-                } else if (configuration.usesPacketChain) {
+                if (configuration.usesPacketChain) {
                     "Full-device forwarding is active. Device traffic is routed through Packet Chain on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
                 } else if (configuration.usesCustomCarrier) {
                     "Full-device forwarding is active. Device traffic is routed through tun2socks into DirectSock on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
@@ -1204,7 +1095,7 @@ class TunnelVpnService : VpnService() {
                     "Full-device forwarding is active. Device traffic is routed through tun2socks into $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}."
                 }
             )
-            parts.add("UDP and Android Private DNS are not supported end-to-end yet, so some apps may fail or retry.")
+            parts.add("IPv6 is captured by the VPN to prevent network leaks. UDP and Android Private DNS are not supported end-to-end yet, so some apps may fail or retry.")
         } else if (diagnostics.localProxyReady) {
             parts.add("Local SOCKS5 proxy is ready on $LOCAL_SOCKS_HOST:${forwardingPort ?: "auto"}, but the Android tun bridge is not up yet.")
         }
@@ -1219,7 +1110,7 @@ class TunnelVpnService : VpnService() {
     private fun initialRuntimeSnapshot(configuration: TunnelConfiguration): TunnelRuntimeSnapshot {
         return TunnelRuntimeSnapshot(
             state = "starting",
-            transport = if (configuration.usesCustomCarrier || configuration.usesPacketChain || configuration.usesPsiphonChain || configuration.usesPrivateRelay) configuration.ingressLabel else configuration.transportLabel,
+            transport = if (configuration.usesCustomCarrier || configuration.usesPacketChain || configuration.usesPrivateRelay) configuration.ingressLabel else configuration.transportLabel,
             serverHost = configuration.serverHost,
             cdnEdge = configuration.normalizedCdnEdge.takeIf { it.isNotBlank() },
             tunnelActive = false,
@@ -1504,6 +1395,8 @@ class TunnelVpnService : VpnService() {
         const val VPN_MTU = 1500
         const val VPN_TUN_ADDRESS = "172.19.0.1"
         const val VPN_TUN_PREFIX = 30
+        const val VPN_TUN_IPV6_ADDRESS = "fd00:7061:636b:6574::1"
+        const val VPN_TUN_IPV6_PREFIX = 64
         const val VPN_DNS_SERVER = "198.18.0.2"
         const val LOCAL_SOCKS_HOST = "127.0.0.1"
         val EGRESS_PROBE_TARGETS = listOf(

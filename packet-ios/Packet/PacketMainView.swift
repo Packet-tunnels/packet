@@ -36,8 +36,6 @@ struct PacketMainView: View {
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $showingDisclosureSheet, onDismiss: handleDisclosureDismissed) {
                 PacketVPNDisclosureSheet(
-                    isConnectFlow: shouldStartTunnelAfterDisclosure,
-                    acceptTitle: shouldStartTunnelAfterDisclosure ? "Accept & Connect" : "Accept",
                     onAccept: acceptDisclosure,
                     onDismiss: dismissDisclosure
                 )
@@ -85,17 +83,6 @@ struct PacketMainView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if let errorText = connectionErrorText {
-                Text(errorText)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(Color.red.opacity(0.1))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-            }
         }
         .padding(20)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
@@ -237,24 +224,6 @@ struct PacketMainView: View {
         case .idle:
             return "Disconnected"
         }
-    }
-
-    private var connectionErrorText: String? {
-        let snapshot = tunnelManager.telemetry.snapshot
-        let configuration = tunnelManager.displayConfiguration
-        if let lastError = snapshot.lastError?.nilIfEmpty {
-            return lastError
-        }
-        if let cdnEdgeValidationError = configuration.cdnEdgeValidationError {
-            return cdnEdgeValidationError
-        }
-        if tunnelManager.state == .failed {
-            return tunnelManager.lastResult.nilIfEmpty ?? "Unknown connection error"
-        }
-        if !tunnelManager.isRunning, let validationError = configuration.validationError {
-            return validationError
-        }
-        return nil
     }
 
     private var configurationSelectionText: String {
@@ -419,13 +388,8 @@ struct ModernMetricTile: View {
 }
 
 struct PacketVPNDisclosureSheet: View {
-    let isConnectFlow: Bool
-    let acceptTitle: String
     let onAccept: () -> Void
     let onDismiss: () -> Void
-    
-    @Environment(\.colorScheme) var colorScheme
-    @State private var isAcknowledged = false
 
     var body: some View {
         NavigationStack {
@@ -464,54 +428,16 @@ struct PacketVPNDisclosureSheet: View {
                     .padding(.bottom, 20)
                 }
 
-                VStack(spacing: 16) {
-                    Button(action: {
-                        let feedback = UIImpactFeedbackGenerator(style: .light)
-                        feedback.impactOccurred()
-                        isAcknowledged.toggle()
-                    }) {
-                        HStack(spacing: 12) {
-                            Image(systemName: isAcknowledged ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 22))
-                                .foregroundStyle(isAcknowledged ? .green : .secondary)
-                            
-                            Text("I have reviewed and understand how my data is handled.")
-                                .font(.system(size: 14, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 4)
-
-                    Button(action: onAccept) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 18, weight: .bold))
-                            
-                            Text(acceptTitle)
-                                .font(.system(size: 17, weight: .bold, design: .rounded))
-                        }
+                HStack(spacing: 12) {
+                    Button("Cancel", action: onDismiss)
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .background(
-                            isAcknowledged 
-                            ? (colorScheme == .dark ? Color.white : Color.black) 
-                            : Color.secondary.opacity(0.2)
-                        )
-                        .foregroundStyle(
-                            isAcknowledged 
-                            ? (colorScheme == .dark ? Color.black : Color.white) 
-                            : Color.secondary
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
-                    .disabled(!isAcknowledged)
 
-                    Button(isConnectFlow ? "Not Now" : "Dismiss", action: onDismiss)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 4)
+                    Button("OK", action: onAccept)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
                 }
                 .padding(28)
                 .background(Color(uiColor: .secondarySystemGroupedBackground))

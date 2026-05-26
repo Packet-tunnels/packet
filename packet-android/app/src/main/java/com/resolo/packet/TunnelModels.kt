@@ -15,10 +15,9 @@ object TunnelActions {
 
 enum class TunnelTransportMode(val rawValue: Int, val title: String) {
     AUTO(0, "Auto"),
-    // QUIC over UDP — the escape transport that survives Iran's "RST every
-    // foreign TLS over TCP" filter, because UDP/443 has to stay open for
-    // WhatsApp / Meet / Telegram video calls. Auto-included in the rotation
-    // pool when the active mode is AUTO.
+    // QUIC over UDP — alternative transport using datagram protocol
+    // for networks with TCP-level filtering. Auto-included in rotation
+    // when active mode is AUTO.
     QUIC(6, "QUIC"),
     WEBSOCKET(1, "WebSocket"),
     HTTP(2, "HTTP"),
@@ -77,10 +76,9 @@ object PacketDefaultProfiles {
             cdnEdge = CHAIN_EDGE,
             hostOverride = "",
             sniOverride = "",
-            // AUTO triggers the candidate-rotation supervisor on the Rust
-            // side, which sweeps WS+ChromeTLS / Obfs / QUIC across every
-            // port we know about — what actually escapes Iran 2026 instead
-            // of being a single Meek HTTP polling shape that gets RST'd.
+            // AUTO triggers multi-protocol rotation supervisor that cycles through
+            // WebSocket, TLS, Obfuscation, and QUIC transport modes to find
+            // working paths on restricted networks.
             transportMode = TunnelTransportMode.AUTO,
             obfsKey = CHAIN_OBFS_KEY,
             upstreamProxy = "",

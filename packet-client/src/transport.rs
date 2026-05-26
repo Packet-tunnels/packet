@@ -59,9 +59,9 @@ pub enum TransportMode {
     /// 443 passes for WhatsApp/Meet/Telegram video calls. See
     /// `quic_tunnel::run_quic_loop` for the wire format.
     Quic,
-    /// Psiphon meek-style HTTP request/response transport. This avoids a
-    /// long-lived WebSocket signature by carrying frames over ordinary
-    /// browser-looking POST/poll traffic with a session cookie.
+    /// Meek-style HTTP request/response transport. This avoids a long-lived
+    /// WebSocket signature by carrying frames over ordinary browser-looking
+    /// POST/poll traffic with a session cookie.
     Meek,
     /// Raw-TCP OSSH-style obfuscated transport. No TLS ClientHello, no HTTP,
     /// no SNI — the wire is uniform random from byte 0. Designed to slip
@@ -107,12 +107,11 @@ pub struct TransportConfig {
     /// the inner frame layer.
     pub obfs_key: Option<String>,
     /// Optional first-hop proxy used to reach the transport ingress. This is
-    /// the Psiphon/Conduit-style layer for networks where the foreign IP is
-    /// reachable only through a local or private bridge.
+    /// a local/private bridge for networks where the foreign IP is reachable
+    /// only through an intermediate hop.
     pub upstream_proxy: Option<String>,
     /// Additional seed hosts the candidate-rotation pool should sweep
-    /// alongside the operator-configured primary. Mirrors Psiphon's
-    /// embedded server list.
+    /// alongside the operator-configured primary.
     pub bootstrap_servers: Vec<String>,
 }
 
@@ -488,7 +487,7 @@ pub async fn run_transport(
 ) {
     match config.mode {
         // WebSocket / Obfs / Auto are the Iran escape paths — run them under
-        // the Psiphon-style candidate-rotation supervisor instead of the
+        // the candidate-rotation supervisor instead of the
         // single-config retry loop, so we grind a whole pool until one
         // combination punches through (this is *why* the working stacks take
         // minutes to connect, not seconds).
@@ -510,7 +509,7 @@ pub async fn run_transport(
     }
 }
 
-/// Psiphon-style persistent multi-candidate connector.
+/// Persistent multi-candidate connector.
 ///
 /// Walks the candidate pool forever. For each candidate it makes ONE attempt
 /// (`ws_session`/`obfs_session` connect + run-until-drop). On failure it
@@ -576,10 +575,6 @@ async fn run_rotating_transport(
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
             Err(e) => {
-                let message = format!("candidate '{}' failed: {}", pool[cand_idx].label, e);
-                mesh::set_status("degraded");
-                mesh::set_last_error(message.clone());
-                set_runtime_last_error(message.clone());
                 warn!(
                     "[PHANTOM] candidate '{}' failed: {} — rotating",
                     pool[cand_idx].label, e

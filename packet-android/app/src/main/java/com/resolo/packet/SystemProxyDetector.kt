@@ -5,19 +5,14 @@ import android.net.ConnectivityManager
 import java.net.URLEncoder
 
 /**
- * Iran's cellular carriers (e.g. MTN IranCell) advertise an HTTP proxy on
- * the LTE APN — observed at `10.131.26.138:8080` on the captured device.
- * Foreign-IP traffic that goes *through* that proxy reaches the open
- * internet; raw `connect()` to a foreign IP is blackholed at the network
- * edge. That's the difference between Psiphon's apparent magic ("connects
- * after 1–2 min on a local port like 40666") and our app's failures:
- * Psiphon respects the system proxy as its first hop, we did not.
+ * Some networks require traffic to route through a system-configured HTTP proxy.
+ * This is especially common on restricted cellular networks.
  *
- * This helper finds the proxy Android currently advertises and rewrites the
- * carrier URI to chain through it via `upstream_http=...`. An
- * operator-supplied upstream is never overwritten.
+ * This helper detects if Android has a default system proxy configured and
+ * rewrites the carrier URI to chain through it via `upstream_http=...`.
+ * An operator-supplied upstream is never overwritten.
  *
- * Works for Wi-Fi with a manual proxy too — same code path.
+ * Works for both cellular APN proxies and Wi-Fi manual proxy settings.
  */
 object SystemProxyDetector {
 
@@ -38,7 +33,7 @@ object SystemProxyDetector {
     }
 
     /**
-     * Append `upstream_http=<hostPort>` to a carrier URI, before the
+     * Append `upstream_http=<hostPort>` to a `trojan://...` URI, before the
      * fragment, unless the URI already specifies an upstream.
      */
     fun appendToTrojanUri(uri: String, hostPort: String): String {

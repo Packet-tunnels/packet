@@ -6,10 +6,10 @@
 // 3. Provides authenticated WebSocket tunnel for persistent connections
 // 4. Accepts Starlink relay nodes that provide unfiltered internet exit
 //
-// Relay Architecture (Starlink bypass):
-//   Mobile Client (Iran) → GCP Server → Relay Node (Starlink) → Free Internet
-//   The relay node connects OUTBOUND to GCP, so it needs no public IP.
-//   GCP forwards all client traffic through the relay for internet access.
+// Relay Architecture:
+//   Mobile Client → Server → Relay Node (Starlink) → Internet
+//   The relay node connects OUTBOUND to server, so it needs no public IP.
+//   Server forwards all client traffic through the relay for internet access.
 
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -54,12 +54,10 @@ struct Cli {
     #[arg(long, default_value = "120")]
     max_drift: u64,
 
-    /// Optional raw-TCP obfuscated ("OSSH-style") tunnel port. When set, a
-    /// second listener accepts connections whose wire bytes are uniform
-    /// random from byte 0 (no TLS ClientHello) — this is the transport
-    /// designed to slip past Iran's "RST any foreign TLS handshake" filter.
-    /// Point a directly-reachable foreign IP at this port (NOT a
-    /// TLS-terminating CDN).
+    /// Optional raw-TCP obfuscated tunnel port. When set, a second listener
+    /// accepts connections with obfuscated wire format (no TLS ClientHello).
+    /// This transport is designed for networks with DPI-based filtering.
+    /// Point a directly-reachable IP at this port (NOT a TLS-terminating CDN).
     #[arg(long, env = "PHANTOM_OBFS_PORT")]
     obfs_port: Option<u16>,
 
@@ -69,12 +67,10 @@ struct Cli {
     #[arg(long, env = "PHANTOM_OBFS_KEY", default_value = "phantom-obfs")]
     obfs_key: String,
 
-    /// Optional QUIC tunnel listener on UDP/<port> (default 443). The
-    /// escape transport for networks that RST every foreign TLS-on-TCP but
-    /// pass UDP/443 because of WhatsApp / Meet / Telegram video calls. A
-    /// self-signed cert is generated at startup; clients use a permissive
-    /// verifier (TLS here is camouflage, the phantom protocol auths
-    /// itself).
+    /// Optional QUIC tunnel listener on UDP/<port> (default 443). Alternative
+    /// transport for networks with TCP-level filtering that allow UDP.
+    /// A self-signed cert is generated at startup; clients use a permissive
+    /// verifier (TLS here is camouflage, the phantom protocol auths itself).
     #[arg(long, env = "PHANTOM_QUIC_PORT")]
     quic_port: Option<u16>,
 }
@@ -283,7 +279,7 @@ async fn main() {
         .route("/api/v1/health", get(health_check))
         .with_state(state.clone());
 
-    // Optional raw-TCP obfuscated tunnel listener (Iran escape transport).
+    // Optional QUIC (UDP) tunnel listener.
     if let Some(quic_port) = cli.quic_port {
         let quic_state = state.clone();
         tokio::spawn(async move {
@@ -298,9 +294,8 @@ async fn main() {
     if let Some(obfs_port) = cli.obfs_port {
         let obfs_state = state.clone();
         let obfs_key = cli.obfs_key.clone().into_bytes();
-        // Dual-stack so OBFS gets the same IPv6 escape path as the HTTP/WS
-        // listener below: Iran's edge filter is laxer on v6 for many mobile
-        // carriers, and OBFS to a v6 host can pass where v4 is blackholed.
+        // Dual-stack (IPv4 + IPv6) for maximum compatibility.
+        // Some networks filter IPv4 more heavily than IPv6.
         let obfs_addr = format!("[::]:{}", obfs_port);
         tokio::spawn(async move {
             run_obfs_listener(obfs_addr, obfs_key, obfs_state).await;
@@ -311,13 +306,10 @@ async fn main() {
         );
     }
 
-    // Bind dual-stack (IPv6 + IPv4 via v4-mapped) on `[::]:port`. Iran's
-    // 2026 edge filter is *much* more aggressive on IPv4 than on IPv6 —
-    // many mobile carriers (IranCell, MCI) assign v6 prefixes and route v6
-    // traffic to foreign hosts even when v4 to the same host is
-    // blackholed. Exposing the tunnel on v6 gives clients an orthogonal
-    // escape path that does not depend on the v4 blackhole at all. Falls
-    // back to v4-only if the kernel rejects dual-stack (rare).
+    // Bind dual-stack (IPv6 + IPv4 via v4-mapped) on `[::]:port`.
+    // IPv6 and IPv4 may have different filtering policies on restricted networks.
+    // Exposing the tunnel on both protocols gives clients multiple escape paths.
+    // Falls back to v4-only if the kernel rejects dual-stack (rare).
     let v6_addr = format!("[::]:{}", cli.port);
     let v4_addr = format!("0.0.0.0:{}", cli.port);
     let listener = match TcpListener::bind(&v6_addr).await {
@@ -1218,7 +1210,7 @@ async fn process_upstream_frame_direct(frame: Frame, session: &Arc<Session>) {
 
 // ─── HTTP Tunnel Sync ──────────────────────────────────────────
 // Original HTTP POST-based tunnel (backward compatible).
-// Still works for direct connections outside Iran.
+// Works for direct connections on unrestricted networks.
 
 async fn handle_sync(
     State(state): State<Arc<AppState>>,

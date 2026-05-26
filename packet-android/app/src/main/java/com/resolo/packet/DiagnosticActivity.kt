@@ -26,11 +26,10 @@ import kotlin.concurrent.thread
  * Connection diagnostic screen.
  *
  * Workflow for the operator:
- *   1. Turn Psiphon ON, open this screen, tap "Run Diagnostic", tap "Copy".
- *      Save that text (report A — tunnelled).
- *   2. Turn Psiphon OFF, run again, copy (report B — direct).
- *   3. Turn Packet ON, run again, copy (report C — Packet local proxy).
- *   4. Send all reports. Raw egress shows process routing; local proxy
+ *   1. Turn Packet ON, open this screen, tap "Run Diagnostic", tap "Copy".
+ *      Save that text while Packet is trying or connected.
+ *   2. Turn Packet OFF, run again, copy the direct report.
+ *   3. Send both reports. Raw egress shows process routing; local proxy
  *      egress shows whether Packet's DirectSock path is actually alive.
  *
  * The raw probe runs on outbound sockets. Packet excludes its own package
@@ -75,7 +74,7 @@ class DiagnosticActivity : Activity() {
         root.addView(headerRow)
 
         root.addView(TextView(this).apply {
-            text = "Built-in Psiphon Escape uses the known Trojan/Cloudflare carrier as Psiphon's upstream, then routes Packet through Psiphon's local proxy. " +
+            text = "Built-in Packet Chain uses the known Trojan/Cloudflare carrier, Chrome TLS, TLSHello fragmentation, and Packet WebSocket escape. " +
                 "Tap Connect on the main screen, then run this report while Packet is still trying or connected."
             textSize = 12f
             setPadding(0, 0, 0, pad / 4)

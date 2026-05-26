@@ -12,20 +12,18 @@ object VpnDisclosureDialogs {
 
     fun show(
         activity: Activity,
-        acceptTitle: String,
-        dismissTitle: String,
         onAccept: () -> Unit,
         onDismiss: (() -> Unit)? = null,
     ) {
         val dialog = AlertDialog.Builder(activity)
             .setTitle(DISCLOSURE_TITLE)
             .setMessage(DISCLOSURE_MESSAGE)
-            .setPositiveButton(acceptTitle) { dialog, _ ->
+            .setPositiveButton("OK") { dialog, _ ->
                 TunnelPreferences.setVpnDisclosureAcknowledged(activity, true)
                 dialog.dismiss()
                 onAccept()
             }
-            .setNegativeButton(dismissTitle) { dialog, _ ->
+            .setNegativeButton("Cancel") { dialog, _ ->
                 dialog.dismiss()
                 onDismiss?.invoke()
             }

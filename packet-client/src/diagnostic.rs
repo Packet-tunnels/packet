@@ -1,19 +1,11 @@
 // diagnostic.rs — Side-by-side connection probe
 //
-// Purpose: figure out *why* a Trojan/WS config that works through the
-// Psiphon+v2ray stack fails when run directly by our app. Instead of
-// guessing at fingerprints, we measure.
+// Purpose: figure out *why* a Trojan/WS config fails when run directly by our
+// app. Instead of guessing at fingerprints, we measure.
 //
 // The experiment the operator runs:
-//   1. Turn Psiphon ON  → run this probe → copy the report (call it A)
-//   2. Turn Psiphon OFF → run this probe → copy the report (call it B)
-//
-// Because Psiphon is an Android VpnService, when it is ON *every* socket on
-// the device — including the sockets this probe opens — is tunnelled through
-// Psiphon's escape transport. So report A shows "what the world looks like
-// once traffic is already out of Iran" and report B shows "what Iran's DPI
-// does to the same traffic when it goes direct". The diff between A and B is
-// the exact thing Psiphon provides that our app currently does not.
+//   1. Turn Packet ON  → run this probe → copy the report.
+//   2. Turn Packet OFF → run this probe → copy the direct report.
 //
 // The single most decisive line is EGRESS IP: if it is Iranian, the probe
 // went direct; if it is foreign, the probe was tunnelled. Everything else is
@@ -914,7 +906,7 @@ fn local_proxy_ports_to_probe() -> Vec<u16> {
 pub async fn run_diagnostic(trojan_uri: &str) -> String {
     let mut r = String::new();
     r.push_str("════════ PACKET CONNECTION DIAGNOSTIC ════════\n");
-    r.push_str("Run this once with Psiphon ON and once with Psiphon OFF, then\n");
+    r.push_str("Run this once with Packet ON and once with Packet OFF, then\n");
     r.push_str("compare. Raw EGRESS tells you whether this diagnostic process is\n");
     r.push_str("already inside a VPN. Packet excludes its own app process from\n");
     r.push_str("Android VpnService to avoid loops, so Packet ON must be judged by\n");
@@ -926,9 +918,9 @@ pub async fn run_diagnostic(trojan_uri: &str) -> String {
         r.push_str(&format!("  {:<20} {}\n", name, val));
     }
     r.push_str("  → Iranian loc/IP = traffic went DIRECT.\n");
-    r.push_str("  → Foreign  loc/IP = traffic was TUNNELLED (Psiphon path).\n\n");
+    r.push_str("  → Foreign  loc/IP = traffic was TUNNELLED.\n\n");
 
-    r.push_str("[2] LOCAL PROXY EGRESS (Packet/Psiphon localhost path)\n");
+    r.push_str("[2] LOCAL PROXY EGRESS (Packet localhost path)\n");
     r.push_str("  These probes hit 127.0.0.1 ports directly. If Packet is connected,\n");
     r.push_str("  the active Packet port should return a foreign/non-Iran exit IP here\n");
     r.push_str("  even when raw EGRESS above is direct. Packet Native may auto-select\n");
@@ -987,7 +979,7 @@ pub async fn run_diagnostic(trojan_uri: &str) -> String {
         \x20 TCP=TIMEOUT → IP-level blackhole. If fragmented WS is OK while\n\
         \x20 normal WS fails, tlshello fragmentation is enough. If only the\n\
         \x20 Chrome-fragment probe works, fp=chrome is required. If both fail\n\
-        \x20 direct but local proxy egress works, a Psiphon-like first hop is\n\
+        \x20 direct but local proxy egress works, an intermediate first hop is\n\
         \x20 the missing layer.\n\n",
     );
 

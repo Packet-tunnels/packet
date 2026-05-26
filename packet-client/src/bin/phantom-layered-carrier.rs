@@ -16,9 +16,9 @@ struct Cli {
 
     /// Disable tlshello fragmentation on the DirectSock TLS handshake.
     ///
-    /// Fragmentation is on by default to match the Psiphon/v2rayNG-style
-    /// DirectSock profile. If an edge rejects the fragmented handshake, the core
-    /// retries once without fragmentation.
+    /// Fragmentation is on by default for the DirectSock profile. If an edge
+    /// rejects the fragmented handshake, the core retries once without
+    /// fragmentation.
     #[arg(long)]
     no_fragment: bool,
 

@@ -1,17 +1,16 @@
-// candidates.rs — Psiphon-style multi-candidate connection rotation
+// candidates.rs — multi-candidate connection rotation
 //
-// The single biggest reason a working stack (v2ray+Psiphon+Conduit) takes up
-// to ~10 minutes to connect while a naive client "fails fast" is that Psiphon
-// does NOT retry one config — it grinds a large candidate pool (server × port
-// × protocol × front) until one combination punches through Iran's DPI, then
-// sticks with it. A single blocked config retried 1000× never helps; a
-// different candidate every attempt eventually finds the hole.
+// Working stacks can take up to ~10 minutes because they do not retry one
+// config forever; they grind a large candidate pool (server × port × protocol
+// × front) until one combination punches through Iran's DPI, then stick with
+// it. A single blocked config retried 1000× never helps; a different candidate
+// every attempt eventually finds the hole.
 //
 // This module turns one base `TransportConfig` into an ordered candidate
 // list: best-guess first (Chrome-TLS WS on 443, fragmented), then widening
 // across ports, fragmentation, and the no-TLS Obfs path. The supervisor in
-// `transport.rs` walks this list forever, never surfacing "failed" — only
-// "still connecting (candidate i/N)", exactly like Psiphon's UI.
+// `transport.rs` walks this list forever, surfacing progress instead of a
+// premature terminal failure.
 
 use crate::transport::{TlsProfile, TransportConfig, TransportMode};
 
@@ -36,8 +35,7 @@ const QUIC_PORTS: &[u16] = &[443, 8443, 53];
 /// Extra seed hosts to include in the candidate pool, alongside whatever
 /// host the operator configured. These are *additional* origins that have
 /// the same `phantom-server` deployed under different IPs — when one IP
-/// burns the others stay reachable, exactly how Psiphon's embedded server
-/// list works. Empty by default; populated either at compile time from
+/// burns the others stay reachable. Empty by default; populated either at compile time from
 /// `PHANTOM_SERVER_POOL` (build-time env, comma-separated `host[:port]`)
 /// or — more importantly — at runtime via the `bootstrap_servers` field
 /// in `ClientConfig`, which the Android / iOS layer plumbs in.
@@ -79,8 +77,7 @@ pub fn build_candidates(base: &TransportConfig) -> Vec<Candidate> {
     //    plus every host in EXTRA_SEED_HOSTS (and any bootstrap_servers
     //    plumbed in via the config — see the merge below). Each gets the
     //    full port × transport sweep, so when one IP burns the others
-    //    keep working — this is exactly Psiphon's "embedded server list"
-    //    behaviour, just merged with the per-host transport diversity.
+    //    keep working with per-host transport diversity.
     let mut hosts: Vec<String> = Vec::new();
     if let Some(primary) = base_host(base) {
         hosts.push(primary);

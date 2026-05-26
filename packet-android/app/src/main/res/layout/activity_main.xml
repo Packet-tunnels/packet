@@ -761,7 +761,7 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="2dp"
-                    android:text="Status"
+                    android:text="Home"
                     android:textColor="#3B82F6"
                     android:textSize="10sp"
                     android:textStyle="bold" />

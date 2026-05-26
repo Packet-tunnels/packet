@@ -437,7 +437,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="DIRECTSOCK CARRIER"
+                android:text="DIRECTSOCK TROJAN"
                 android:textColor="#6B7280"
                 android:textSize="9sp"
                 android:textStyle="bold" />
@@ -449,7 +449,7 @@
                 android:layout_marginTop="8dp"
                 android:background="@drawable/bg_outline_field"
                 android:gravity="top"
-                android:hint="trojan://password@edge:443 or vless://uuid@edge:443?... or V2Ray JSON"
+                android:hint="trojan://password@edge.example:443?security=tls&amp;type=tcp&amp;fp=chrome&amp;sni=front.example"
                 android:inputType="textUri|textMultiLine"
                 android:paddingStart="14dp"
                 android:paddingTop="10dp"
@@ -465,7 +465,7 @@
                 android:layout_height="46dp"
                 android:layout_marginTop="12dp"
                 android:background="@drawable/bg_outline_field"
-                android:hint="Carrier local port (10808)"
+                android:hint="DirectSock local port (10808)"
                 android:inputType="number"
                 android:paddingStart="14dp"
                 android:paddingEnd="14dp"

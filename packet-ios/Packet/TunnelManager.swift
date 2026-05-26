@@ -293,14 +293,22 @@ final class TunnelManager: ObservableObject {
             queue: .main
         ) { [weak self] notification in
             guard
-                let self,
-                let connection = notification.object as? NEVPNConnection,
-                connection == self.providerManager?.connection
+                let connection = notification.object as? NEVPNConnection
             else {
                 return
             }
 
-            self.apply(connection.status)
+            Task { @MainActor [weak self, weak connection] in
+                guard
+                    let self,
+                    let connection,
+                    connection == self.providerManager?.connection
+                else {
+                    return
+                }
+
+                self.apply(connection.status)
+            }
         }
     }
 
@@ -492,14 +500,6 @@ final class TunnelManager: ObservableObject {
                 configurations[i].configuration.secret = secret
             }
         }
-
-        configurations = refreshBuiltInProfiles(configurations)
-
-        if selectedConfigurationID == nil {
-            selectedConfigurationID = configurations.first {
-                $0.name == PacketDefaultProfiles.psiphonChainName
-            }?.id ?? configurations.first?.id
-        }
         
         self.savedConfigurations = configurations
         self.selectedConfigurationID = selectedConfigurationID ?? configurations.first?.id
@@ -520,39 +520,6 @@ final class TunnelManager: ObservableObject {
         }
 
         persistConfigurationListState()
-    }
-
-    private func refreshBuiltInProfiles(
-        _ configurations: [SavedTunnelConfiguration]
-    ) -> [SavedTunnelConfiguration] {
-        var refreshed = configurations
-
-        func upsert(name: String, configuration: TunnelConfiguration, preferFirst: Bool = false) {
-            if let index = refreshed.firstIndex(where: { $0.name == name }) {
-                refreshed[index].configuration = configuration
-                return
-            }
-
-            let savedConfiguration = SavedTunnelConfiguration(name: name, configuration: configuration)
-            if preferFirst {
-                refreshed.insert(savedConfiguration, at: 0)
-            } else {
-                refreshed.append(savedConfiguration)
-            }
-        }
-
-        upsert(
-            name: PacketDefaultProfiles.psiphonChainName,
-            configuration: PacketDefaultProfiles.psiphonChainConfiguration,
-            preferFirst: true
-        )
-        upsert(
-            name: PacketDefaultProfiles.chainName,
-            configuration: PacketDefaultProfiles.packetChainConfiguration
-        )
-        upsert(name: "Packet QUIC", configuration: PacketDefaultProfiles.quicConfiguration)
-
-        return refreshed
     }
 
     private func persistedConfiguration(from manager: NETunnelProviderManager) -> TunnelConfiguration? {

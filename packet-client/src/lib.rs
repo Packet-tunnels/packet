@@ -103,9 +103,8 @@ pub struct ClientConfig {
     pub upstream_proxy: Option<String>,
     /// Extra seed hosts injected into the rotation pool alongside the
     /// operator-configured primary host. Each gets the full port ×
-    /// transport candidate sweep — equivalent to Psiphon's embedded
-    /// server list. Hosts can be `ip` or `ip:port` (port is ignored when
-    /// the candidate sweep specifies its own).
+    /// transport candidate sweep. Hosts can be `ip` or `ip:port` (port is
+    /// ignored when the candidate sweep specifies its own).
     pub bootstrap_servers: Vec<String>,
 }
 

@@ -78,115 +78,41 @@ object TunnelPreferences {
 
     private fun ensureConfigurationStore(context: Context) {
         val preferences = prefs(context)
-        val savedConfigurations = loadSavedConfigurationsInternal(preferences)
+        val selectedId = preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null)
+        val loadedConfigurations = loadSavedConfigurationsInternal(preferences)
+        val savedConfigurations = dedupeSavedConfigurations(loadedConfigurations, selectedId)
         if (savedConfigurations.isNotEmpty()) {
-            val psiphonProfile = savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.PSIPHON_CHAIN_NAME }?.let { existing ->
-                val refreshed = existing.copy(configuration = PacketDefaultProfiles.psiphonChainConfiguration())
-                val index = savedConfigurations.indexOfFirst { it.id == existing.id }
-                if (index >= 0 && savedConfigurations[index].configuration != refreshed.configuration) {
-                    savedConfigurations[index] = refreshed
-                    persistSavedConfigurations(preferences.edit(), savedConfigurations)
-                        .let { editor ->
-                            if (preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null) == refreshed.id) {
-                                mirrorLegacyConfiguration(editor, refreshed.configuration)
-                            } else {
-                                editor
-                            }
-                        }
-                        .apply()
-                }
-                refreshed
-            } ?: run {
-                val inserted = SavedTunnelConfiguration(
-                    name = PacketDefaultProfiles.PSIPHON_CHAIN_NAME,
-                    configuration = PacketDefaultProfiles.psiphonChainConfiguration(),
-                )
-                savedConfigurations.add(0, inserted)
-                persistSavedConfigurations(preferences.edit(), savedConfigurations).apply()
-                inserted
+            val removedBuiltInDefault = savedConfigurations.removeAll {
+                it.name == PacketDefaultProfiles.CHAIN_NAME &&
+                    it.configuration == PacketDefaultProfiles.chainConfiguration()
             }
 
-            savedConfigurations.firstOrNull { it.name == PacketDefaultProfiles.CHAIN_NAME }?.let { existing ->
-                val refreshed = existing.copy(configuration = PacketDefaultProfiles.chainConfiguration())
-                val index = savedConfigurations.indexOfFirst { it.id == existing.id }
-                if (index >= 0 && savedConfigurations[index].configuration != refreshed.configuration) {
-                    savedConfigurations[index] = refreshed
-                    persistSavedConfigurations(preferences.edit(), savedConfigurations)
-                        .let { editor ->
-                            if (preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null) == refreshed.id) {
-                                mirrorLegacyConfiguration(editor, refreshed.configuration)
-                            } else {
-                                editor
-                            }
-                        }
-                        .apply()
-                }
-                refreshed
-            } ?: run {
-                val inserted = SavedTunnelConfiguration(
-                    name = PacketDefaultProfiles.CHAIN_NAME,
-                    configuration = PacketDefaultProfiles.chainConfiguration(),
-                )
-                savedConfigurations.add(0, inserted)
-                persistSavedConfigurations(preferences.edit(), savedConfigurations)
-                    .putString(KEY_SELECTED_CONFIGURATION_ID, inserted.id)
-                    .let { mirrorLegacyConfiguration(it, inserted.configuration) }
+            if (removedBuiltInDefault || savedConfigurations.size != loadedConfigurations.size) {
+                persistSavedConfigurations(preferences.edit(), savedConfigurations).apply()
+            }
+
+            if (savedConfigurations.isEmpty()) {
+                preferences.edit()
+                    .remove(KEY_SELECTED_CONFIGURATION_ID)
                     .apply()
-                inserted
+                return
             }
 
-            // Ensure the built-in Packet QUIC test profile also exists so
-            // the user has a one-tap UDP/443 escape to select.
-            if (savedConfigurations.none { it.name == PacketDefaultProfiles.QUIC_NAME }) {
-                savedConfigurations.add(
-                    SavedTunnelConfiguration(
-                        name = PacketDefaultProfiles.QUIC_NAME,
-                        configuration = PacketDefaultProfiles.quicConfiguration(),
-                    )
-                )
-                persistSavedConfigurations(preferences.edit(), savedConfigurations).apply()
-            }
-
-            val selectedId = preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null)
-            val selectedEntry = savedConfigurations.firstOrNull { it.id == selectedId }
             if (selectedId == null || savedConfigurations.none { it.id == selectedId }) {
+                val nextConfiguration = savedConfigurations.first()
                 preferences.edit()
-                    .putString(KEY_SELECTED_CONFIGURATION_ID, psiphonProfile.id)
+                    .putString(KEY_SELECTED_CONFIGURATION_ID, nextConfiguration.id)
+                    .let { mirrorLegacyConfiguration(it, nextConfiguration.configuration) }
                     .apply()
-                mirrorLegacyConfiguration(preferences.edit(), psiphonProfile.configuration).apply()
-            } else if (selectedEntry?.name in setOf(PacketDefaultProfiles.CHAIN_NAME, PacketDefaultProfiles.QUIC_NAME)) {
-                preferences.edit()
-                    .putString(KEY_SELECTED_CONFIGURATION_ID, psiphonProfile.id)
-                    .apply()
-                mirrorLegacyConfiguration(preferences.edit(), psiphonProfile.configuration).apply()
             }
             return
         }
 
         val legacyConfiguration = loadLegacyConfiguration(preferences)
         if (legacyConfiguration.isEmpty) {
-            val defaultConfiguration = SavedTunnelConfiguration(
-                name = PacketDefaultProfiles.PSIPHON_CHAIN_NAME,
-                configuration = PacketDefaultProfiles.psiphonChainConfiguration(),
-            )
-            val chainConfiguration = SavedTunnelConfiguration(
-                name = PacketDefaultProfiles.CHAIN_NAME,
-                configuration = PacketDefaultProfiles.chainConfiguration(),
-            )
-            val quicConfiguration = SavedTunnelConfiguration(
-                name = PacketDefaultProfiles.QUIC_NAME,
-                configuration = PacketDefaultProfiles.quicConfiguration(),
-            )
             preferences.edit()
-                .putString(
-                    KEY_SAVED_CONFIGURATIONS,
-                    JSONArray()
-                        .put(defaultConfiguration.toJsonObject())
-                        .put(chainConfiguration.toJsonObject())
-                        .put(quicConfiguration.toJsonObject())
-                        .toString(),
-                )
-                .putString(KEY_SELECTED_CONFIGURATION_ID, defaultConfiguration.id)
+                .remove(KEY_SAVED_CONFIGURATIONS)
+                .remove(KEY_SELECTED_CONFIGURATION_ID)
                 .apply()
             return
         }
@@ -231,6 +157,42 @@ object TunnelPreferences {
                 }
             }.toMutableList()
         }.getOrDefault(mutableListOf())
+    }
+
+    private fun configurationIdentity(configuration: TunnelConfiguration): String {
+        return listOf(
+            configuration.stackMode.rawValue.toString(),
+            configuration.normalizedServerUrl,
+            configuration.normalizedSecret,
+            configuration.listenPort.trim(),
+            configuration.normalizedCdnEdge,
+            configuration.normalizedHostOverride,
+            configuration.normalizedSniOverride,
+            configuration.transportMode.rawValue.toString(),
+            configuration.normalizedObfsKey,
+            configuration.normalizedUpstreamProxy,
+            configuration.fragmentEnabled.toString(),
+            configuration.fragmentSize.trim(),
+            configuration.normalizedTrojanCarrierUri,
+            configuration.carrierProxyPort.trim(),
+        ).joinToString(separator = "\u001F")
+    }
+
+    private fun dedupeSavedConfigurations(
+        configurations: List<SavedTunnelConfiguration>,
+        preferredId: String? = null,
+    ): MutableList<SavedTunnelConfiguration> {
+        val byIdentity = linkedMapOf<String, SavedTunnelConfiguration>()
+        configurations.forEach { savedConfiguration ->
+            val identity = configurationIdentity(savedConfiguration.configuration)
+            val existing = byIdentity[identity]
+            if (existing == null ||
+                (savedConfiguration.id == preferredId && existing.id != preferredId)
+            ) {
+                byIdentity[identity] = savedConfiguration
+            }
+        }
+        return byIdentity.values.toMutableList()
     }
 
     private fun persistSavedConfigurations(
@@ -310,7 +272,31 @@ object TunnelPreferences {
     ): SavedTunnelConfiguration {
         ensureConfigurationStore(context)
         val preferences = prefs(context)
-        val configurations = loadSavedConfigurationsInternal(preferences)
+        val configurations = dedupeSavedConfigurations(loadSavedConfigurationsInternal(preferences))
+        val existingConfiguration = configurations.firstOrNull {
+            configurationIdentity(it.configuration) == configurationIdentity(configuration)
+        }
+        if (existingConfiguration != null) {
+            val editor = preferences.edit()
+                .putString(KEY_SELECTED_CONFIGURATION_ID, existingConfiguration.id)
+            val selectedConfiguration = if (existingConfiguration.name.isBlank() && name.isNotBlank()) {
+                existingConfiguration.copy(name = name)
+            } else {
+                existingConfiguration
+            }
+
+            if (selectedConfiguration != existingConfiguration) {
+                val index = configurations.indexOfFirst { it.id == existingConfiguration.id }
+                if (index != -1) {
+                    configurations[index] = selectedConfiguration
+                    persistSavedConfigurations(editor, configurations)
+                }
+            }
+
+            mirrorLegacyConfiguration(editor, selectedConfiguration.configuration).commit()
+            return selectedConfiguration
+        }
+
         val savedConfiguration = SavedTunnelConfiguration(name = name, configuration = configuration)
         configurations.add(savedConfiguration)
         persistSavedConfigurations(preferences.edit(), configurations)
@@ -336,13 +322,15 @@ object TunnelPreferences {
 
         val updatedConfiguration = configurations[index].copy(name = name, configuration = configuration)
         configurations[index] = updatedConfiguration
+        val dedupedConfigurations = dedupeSavedConfigurations(configurations, id)
+        val savedConfiguration = dedupedConfigurations.firstOrNull { it.id == id } ?: updatedConfiguration
 
-        val editor = persistSavedConfigurations(preferences.edit(), configurations)
+        val editor = persistSavedConfigurations(preferences.edit(), dedupedConfigurations)
         if (preferences.getString(KEY_SELECTED_CONFIGURATION_ID, null) == id) {
-            mirrorLegacyConfiguration(editor, configuration)
+            mirrorLegacyConfiguration(editor, savedConfiguration.configuration)
         }
         editor.commit()
-        return updatedConfiguration
+        return savedConfiguration
     }
 
     fun removeConfiguration(context: Context, id: String): Boolean {
