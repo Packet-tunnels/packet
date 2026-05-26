@@ -97,20 +97,27 @@ Configure the client using the output from `deploy-vps.sh`. Clients need:
 
 ## Legal & Support
 
-- **Privacy Policy:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/privacy.html)
-- **Terms of Use:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/terms.html)
-- **Support:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/support.html)
-- **Contact:** support@packet-tunnels.app
+### Page URLs (for iOS/Android apps)
 
-### GitHub Pages (Optional)
+Once GitHub Pages is enabled:
 
-To enable GitHub Pages for this repository:
-1. Go to Settings → Pages
-2. Select **Deploy from a branch**
-3. Branch: `main` | Folder: `/docs`
-4. Click Save
+- **Privacy Policy:** https://packet-tunnels.github.io/packet/privacy.html
+- **Terms of Use:** https://packet-tunnels.github.io/packet/terms.html
+- **Support:** https://packet-tunnels.github.io/packet/support.html
+- **Contact Email:** support@packet-tunnels.app
 
-Then access pages at: `https://packet-tunnels.github.io/packet/`
+### Enable GitHub Pages
+
+To activate these pages:
+
+1. Go to **Settings** → **Pages**
+2. Under "Build and deployment":
+   - Source: **Deploy from a branch**
+   - Branch: **main**
+   - Folder: **/docs**
+3. Click **Save**
+
+Pages will be live in 1-2 minutes. Add the above URLs to your iOS/Android app settings.
 
 ## License
 
