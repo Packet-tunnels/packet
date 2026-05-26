@@ -51,6 +51,30 @@ packet-ios/*.xcodeproj
 packet-ios/*.xcodeproj/xcuserdata
 packet-ios/*.xcodeproj/project.xcworkspace/xcuserdata
 packet-ios/*.xcworkspace/xcuserdata
+packet-ios/project.yml
+
+# iOS App Store & Certificates (SENSITIVE)
+*.mobileprovision
+*.cer
+*.p12
+*.certSigningRequest
+*.privkey
+*.pub
+
+# iOS Build Artifacts
+packet-ios/*.ipa
+packet-ios/*.app
+packet-ios/*.dSYM.zip
+packet-ios/build_check.log
+packet-ios/build/
+
+# iOS Automation & Scripts
+packet-ios/fastlane/
+packet-ios/scripts/
+
+# App Store Documentation (contains sensitive review notes)
+APP_STORE_RELEASE_CHECKLIST.md
+APP_STORE_REVIEW_NOTES_TEMPLATE.md
 
 # Android
 packet-android/.gradle/
