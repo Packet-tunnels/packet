@@ -28,6 +28,7 @@ packet-proto/Cargo.lock
 .agents/
 .cache/
 scripts/
+tools/
 .vscode/
 .idea/
 
