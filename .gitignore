@@ -147,6 +147,10 @@ icons/
 screenshots/
 artwork/
 
+# Separate public website repo
+packet-public/
+public-website/
+
 # System
 Thumbs.db
 *.log
