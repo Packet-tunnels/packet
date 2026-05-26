@@ -99,12 +99,18 @@ Configure the client using the output from `deploy-vps.sh`. Clients need:
 
 ### Page URLs (for iOS/Android apps)
 
-Once GitHub Pages is enabled:
+**Immediate URLs (always work):**
 
-- **Privacy Policy:** https://packet-tunnels.github.io/packet/privacy.html
-- **Terms of Use:** https://packet-tunnels.github.io/packet/terms.html
-- **Support:** https://packet-tunnels.github.io/packet/support.html
+- **Privacy Policy:** https://raw.githubusercontent.com/Packet-tunnels/packet/main/docs/privacy.html
+- **Terms of Use:** https://raw.githubusercontent.com/Packet-tunnels/packet/main/docs/terms.html
+- **Support:** https://raw.githubusercontent.com/Packet-tunnels/packet/main/docs/support.html
 - **Contact Email:** support@packet-tunnels.app
+
+**GitHub Pages URLs (after 5-10 min build):**
+
+- Privacy: https://packet-tunnels.github.io/packet/privacy.html
+- Terms: https://packet-tunnels.github.io/packet/terms.html
+- Support: https://packet-tunnels.github.io/packet/support.html
 
 ### Enable GitHub Pages
 
