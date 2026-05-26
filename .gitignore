@@ -1,4 +1,4 @@
-# Build artifacts
+# Build artifacts & binaries
 /target
 /build
 packet-android/.gradle
@@ -10,6 +10,14 @@ packet-ios/.build
 *.apk
 *.ipa
 erl_crash.dump
+
+# Development tools & IDEs
+.claude/
+.agents/
+.cache/
+scripts/
+.vscode/
+.idea/
 
 # Dependencies
 Cargo.lock
