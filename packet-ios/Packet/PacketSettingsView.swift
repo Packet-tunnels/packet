@@ -79,17 +79,25 @@ struct PacketSettingsView: View {
                         }
                     }
                     .disabled(tunnelManager.isRunning)
+                } header: {
+                    Text("Server Setting")
+                }
 
+                Section {
                     Button(role: .destructive) {
                         confirmation = .resetSelectedConfiguration
                     } label: {
                         SettingsActionRow(
                             systemImage: "arrow.counterclockwise",
-                            title: "Reset"
+                            title: "Reset Configuration"
                         )
                     }
                     .disabled(tunnelManager.isRunning || !tunnelManager.hasConnectableConfiguration)
+                } header: {
+                    Text("Reset Configuration")
+                }
 
+                Section {
                     Button(role: .destructive) {
                         confirmation = .deleteAllConfigurations
                     } label: {
@@ -100,7 +108,7 @@ struct PacketSettingsView: View {
                     }
                     .disabled(tunnelManager.isRunning || tunnelManager.savedConfigurations.isEmpty)
                 } header: {
-                    Text("Configuration")
+                    Text("Delete All")
                 }
 
                 Section {
