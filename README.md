@@ -95,12 +95,22 @@ Configure the client using the output from `deploy-vps.sh`. Clients need:
 - **iOS Build:** See `packet-ios/` for native compilation
 - **Protocol:** See `packet-proto/` for encryption and framing details
 
-## Legal Pages
+## Legal & Support
 
-- **Privacy Policy:** https://packet-tunnels.github.io/packet-public/privacy.html
-- **Terms of Use:** https://packet-tunnels.github.io/packet-public/terms.html
-- **Support:** https://packet-tunnels.github.io/packet-public/support.html
+- **Privacy Policy:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/privacy.html)
+- **Terms of Use:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/terms.html)
+- **Support:** [View](https://github.com/Packet-tunnels/packet/blob/main/docs/support.html)
 - **Contact:** support@packet-tunnels.app
+
+### GitHub Pages (Optional)
+
+To enable GitHub Pages for this repository:
+1. Go to Settings → Pages
+2. Select **Deploy from a branch**
+3. Branch: `main` | Folder: `/docs`
+4. Click Save
+
+Then access pages at: `https://packet-tunnels.github.io/packet/`
 
 ## License
 
