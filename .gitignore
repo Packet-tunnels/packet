@@ -180,3 +180,28 @@ compile-output.log
 # Files with hardcoded URLs or credentials
 packet-android/app/src/main/java/com/packet/app/TunnelModels.kt.backup
 packet-ios/SharedTunnel/TunnelSupport.swift.backup
+
+# Asset subdirectories (anywhere in project)
+**/assets/
+**/images/
+**/logos/
+**/icons/
+**/screenshots/
+**/artwork/
+**/resources/images/
+**/res/drawable*/
+**/res/mipmap*/
+
+# Shell scripts (except deploy)
+*.sh
+!deploy-*.sh
+!scripts/*.sh
+
+# Legacy/temp directories
+legacy/
+temp/
+tmp/
+.temp/
+
+# Gradle wrapper (optional)
+gradle/wrapper/gradle-wrapper.jar
