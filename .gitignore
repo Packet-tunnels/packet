@@ -14,14 +14,20 @@ erl_crash.dump
 # Rust engine source (binaries only, no source)
 packet-server/src/
 packet-server/Cargo.lock
+packet-server/main.rs
 packet-relay/src/
 packet-relay/Cargo.lock
+packet-relay/main.rs
 packet-bridge/src/
 packet-bridge/Cargo.lock
+packet-bridge/main.rs
 packet-client/src/
 packet-client/Cargo.lock
+packet-client/main.rs
 packet-proto/src/
 packet-proto/Cargo.lock
+*/src/main.rs
+**/main.rs
 
 # Development tools & IDEs
 .claude/
@@ -31,6 +37,12 @@ scripts/
 tools/
 .vscode/
 .idea/
+
+# Build & Test Scripts
+packet-android/scripts/*.sh
+packet-ios/scripts/*.sh
+*.sh.bak
+*_copy.sh
 
 # Dependencies
 Cargo.lock
