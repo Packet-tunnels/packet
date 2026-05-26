@@ -227,6 +227,26 @@ final class TunnelManager: ObservableObject {
         persistConfigurationListState()
     }
 
+    func updateSelectedConfiguration(_ update: (inout TunnelConfiguration) -> Void) {
+        guard !isRunning else { return }
+
+        var updatedConfiguration = configuration
+        update(&updatedConfiguration)
+
+        if let selectedConfigurationID,
+            let selectedConfiguration = savedConfigurations.first(where: { $0.id == selectedConfigurationID })
+        {
+            updateConfiguration(
+                id: selectedConfigurationID,
+                name: selectedConfiguration.name,
+                configuration: updatedConfiguration
+            )
+        } else {
+            configuration = updatedConfiguration
+            persistConfigurationListState()
+        }
+    }
+
     func deleteConfiguration(id: UUID) {
         savedConfigurations.removeAll { $0.id == id }
         PacketKeychainStore.shared.deleteSecret(for: id.uuidString)

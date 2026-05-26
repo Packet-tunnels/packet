@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Terms of Use - Packet</title>
+    <meta name="description" content="Packet Terms of Use for the iOS and Android apps.">
+    <style>
+        :root {
+            --bg: #0a0a0a;
+            --surface: #111111;
+            --border: #1e1e1e;
+            --primary: #f5f5f5;
+            --secondary: #999;
+            --muted: #555;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--primary);
+            font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            line-height: 1.7;
+        }
+
+        nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 32px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        a { color: var(--primary); }
+        .brand { font-weight: 700; text-decoration: none; }
+        .back { color: var(--secondary); text-decoration: none; font-size: 14px; }
+
+        header, main {
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 56px 24px;
+        }
+
+        header { border-bottom: 1px solid var(--border); }
+        .label {
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+
+        h1 {
+            margin: 8px 0 8px;
+            font-size: clamp(32px, 5vw, 48px);
+            line-height: 1.05;
+        }
+
+        .updated { color: var(--muted); font-size: 13px; }
+        section { margin-bottom: 40px; }
+        h2 { font-size: 20px; margin: 0 0 10px; }
+        p, li { color: var(--secondary); font-size: 15px; }
+        ul { padding-left: 22px; }
+        footer {
+            border-top: 1px solid var(--border);
+            color: var(--muted);
+            padding: 28px 24px;
+            text-align: center;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+    <nav>
+        <a class="brand" href="index.html">Packet</a>
+        <a class="back" href="index.html">Back to Home</a>
+    </nav>
+
+    <header>
+        <div class="label">Legal</div>
+        <h1>Terms of Use</h1>
+        <div class="updated">Last Updated: May 18, 2026</div>
+    </header>
+
+    <main>
+        <section>
+            <h2>1. Your Configuration</h2>
+            <p>Packet lets you connect to tunnel servers that you configure. You are responsible for using servers and credentials that you are authorized to use.</p>
+        </section>
+
+        <section>
+            <h2>2. Acceptable Use</h2>
+            <p>Do not use Packet to violate laws, attack networks, intercept traffic without permission, or bypass access controls where you do not have authorization.</p>
+        </section>
+
+        <section>
+            <h2>3. No Managed VPN Service</h2>
+            <p>Packet is a client app. Unless separately stated, Packet does not provide shared public VPN servers and does not operate your configured tunnel endpoint.</p>
+        </section>
+
+        <section>
+            <h2>4. Availability</h2>
+            <p>Network conditions, server configuration, carrier policy, platform VPN limits, and local device settings can affect connectivity. Packet is provided without a guaranteed uptime commitment.</p>
+        </section>
+
+        <section>
+            <h2>5. Contact</h2>
+            <p>Questions about these terms can be sent to <a href="mailto:support@packetapp.net">support@packetapp.net</a>.</p>
+        </section>
+    </main>
+
+    <footer>(c) 2026 Packet</footer>
+</body>
+</html>

@@ -17,6 +17,33 @@ struct PacketSettingsView: View {
         tunnelManager.displayConfiguration
     }
 
+    private var transportSelection: Binding<TunnelTransportMode> {
+        Binding(
+            get: {
+                activeConfiguration.transportMode
+            },
+            set: { mode in
+                tunnelManager.updateSelectedConfiguration { configuration in
+                    configuration.transportMode = mode
+                }
+            }
+        )
+    }
+
+    private var tlsFragmentationSelection: Binding<TLSFragmentationOption> {
+        Binding(
+            get: {
+                TLSFragmentationOption(configuration: activeConfiguration)
+            },
+            set: { option in
+                tunnelManager.updateSelectedConfiguration { configuration in
+                    configuration.fragmentEnabled = option != .off
+                    configuration.fragmentSize = option.fragmentSize
+                }
+            }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             List {
@@ -27,28 +54,38 @@ struct PacketSettingsView: View {
                         value: activeConfiguration.stackMode.title
                     )
 
-                    SettingsSummaryRow(
-                        systemImage: "arrow.triangle.2.circlepath",
-                        title: "Transport",
-                        value: activeConfiguration.usesCustomCarrier
-                            ? activeConfiguration.ingressLabel
-                            : activeConfiguration.transportMode.title
-                    )
+                    Picker(
+                        selection: transportSelection,
+                        label: SettingsPickerLabel(
+                            systemImage: "arrow.triangle.2.circlepath",
+                            title: "Transport"
+                        )
+                    ) {
+                        ForEach(TunnelTransportMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .disabled(tunnelManager.isRunning || activeConfiguration.usesCustomCarrier)
 
-                    SettingsSummaryRow(
-                        systemImage: "rectangle.compress.vertical",
-                        title: "TLS Fragmentation",
-                        value: activeConfiguration.fragmentEnabled
-                            ? "\(activeConfiguration.fragmentSizeValue) bytes"
-                            : "Off"
-                    )
+                    Picker(
+                        selection: tlsFragmentationSelection,
+                        label: SettingsPickerLabel(
+                            systemImage: "rectangle.compress.vertical",
+                            title: "TLS Fragmentation"
+                        )
+                    ) {
+                        ForEach(TLSFragmentationOption.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+                    .disabled(tunnelManager.isRunning)
 
                     Button(role: .destructive) {
                         confirmation = .resetSelectedConfiguration
                     } label: {
                         SettingsActionRow(
                             systemImage: "arrow.counterclockwise",
-                            title: "Reset Selected Configuration"
+                            title: "Reset"
                         )
                     }
                     .disabled(tunnelManager.isRunning || !tunnelManager.hasConnectableConfiguration)
@@ -58,10 +95,28 @@ struct PacketSettingsView: View {
                     } label: {
                         SettingsActionRow(
                             systemImage: "trash",
-                            title: "Delete All Server Profiles"
+                            title: "Delete All"
                         )
                     }
                     .disabled(tunnelManager.isRunning || tunnelManager.savedConfigurations.isEmpty)
+                } header: {
+                    Text("Configuration")
+                }
+
+                Section {
+                    Link(destination: PacketLegalLinks.privacy) {
+                        SettingsLinkRow(systemImage: "hand.raised", title: "Privacy")
+                    }
+
+                    Link(destination: PacketLegalLinks.terms) {
+                        SettingsLinkRow(systemImage: "doc.text", title: "Terms")
+                    }
+
+                    Link(destination: PacketLegalLinks.support) {
+                        SettingsLinkRow(systemImage: "questionmark.circle", title: "Support")
+                    }
+                } header: {
+                    Text("Legal")
                 }
 
                 Section {
@@ -70,20 +125,8 @@ struct PacketSettingsView: View {
                         title: "Version",
                         value: buildVersionLabel
                     )
-                }
-
-                Section {
-                    Link(destination: PacketLegalLinks.privacy) {
-                        SettingsLinkRow(systemImage: "hand.raised", title: "Privacy Policy")
-                    }
-
-                    Link(destination: PacketLegalLinks.terms) {
-                        SettingsLinkRow(systemImage: "doc.text", title: "Terms of Use")
-                    }
-
-                    Link(destination: PacketLegalLinks.support) {
-                        SettingsLinkRow(systemImage: "questionmark.circle", title: "Support")
-                    }
+                } header: {
+                    Text("Version")
                 }
             }
             .listStyle(.insetGrouped)
@@ -164,9 +207,67 @@ private enum SettingsConfirmation {
 }
 
 private enum PacketLegalLinks {
-    static let privacy = URL(string: "https://packet-tunnels.github.io/public/privacy.html")!
-    static let terms = URL(string: "https://packet-tunnels.github.io/public/terms.html")!
-    static let support = URL(string: "https://packet-tunnels.github.io/public/support.html")!
+    static let privacy = URL(string: "https://packet-tunnels.github.io/packet/privacy.html")!
+    static let terms = URL(string: "https://packet-tunnels.github.io/packet/terms.html")!
+    static let support = URL(string: "https://packet-tunnels.github.io/packet/support.html")!
+}
+
+private enum TLSFragmentationOption: String, CaseIterable, Identifiable {
+    case off
+    case bytes40
+    case bytes80
+    case bytes100
+    case bytes200
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off:
+            return "Off"
+        case .bytes40:
+            return "40 bytes"
+        case .bytes80:
+            return "80 bytes"
+        case .bytes100:
+            return "100 bytes"
+        case .bytes200:
+            return "200 bytes"
+        }
+    }
+
+    var fragmentSize: String {
+        switch self {
+        case .off:
+            return "40"
+        case .bytes40:
+            return "40"
+        case .bytes80:
+            return "80"
+        case .bytes100:
+            return "100"
+        case .bytes200:
+            return "200"
+        }
+    }
+
+    init(configuration: TunnelConfiguration) {
+        guard configuration.fragmentEnabled else {
+            self = .off
+            return
+        }
+
+        switch configuration.fragmentSizeValue {
+        case 80:
+            self = .bytes80
+        case 100:
+            self = .bytes100
+        case 200:
+            self = .bytes200
+        default:
+            self = .bytes40
+        }
+    }
 }
 
 private struct SettingsSummaryRow: View {
@@ -210,6 +311,25 @@ private struct SettingsActionRow: View {
                 .font(.system(size: 15, weight: .regular))
 
             Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+private struct SettingsPickerLabel: View {
+    let systemImage: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+
+            Text(title)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundStyle(.primary)
         }
         .padding(.vertical, 4)
     }
