@@ -150,6 +150,7 @@ artwork/
 # Separate public website repo
 packet-public/
 public-website/
+static/
 
 # System
 Thumbs.db
